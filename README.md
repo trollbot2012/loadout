@@ -16,7 +16,13 @@ An audit is on-demand advice, so it's invoked (at project start), not event-driv
 
 ## Install
 
-Copy the folder into your harness's skills dir:
+One-liner (installs into your agents via the skills CLI; add `-g` for user-level):
+
+```bash
+npx skills add trollbot2012/loadout
+```
+
+Or copy the folder into your harness's skills dir manually:
 
 | Host | Destination |
 |------|-------------|
