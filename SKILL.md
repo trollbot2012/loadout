@@ -101,9 +101,9 @@ Harness: <detected> | Project type: <classification>
 Keep the report short enough to act on. If the user asks, save it to the project
 (e.g. `LOADOUT.md`).
 
-### 5. Select & apply
+### 5. Select & apply (always — this is part of the flow, not an offer)
 
-After the report, offer to activate it. Selection first:
+Immediately after presenting the report, ALWAYS show the selection prompt:
 
 - If the harness has a native multi-select prompt (Claude Code: AskUserQuestion
   with `multiSelect: true`), present the recommendations as checkboxes — one
