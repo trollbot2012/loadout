@@ -101,6 +101,45 @@ Harness: <detected> | Project type: <classification>
 Keep the report short enough to act on. If the user asks, save it to the project
 (e.g. `LOADOUT.md`).
 
+### 5. Select & apply
+
+After the report, offer to activate it. Selection first:
+
+- If the harness has a native multi-select prompt (Claude Code: AskUserQuestion
+  with `multiSelect: true`), present the recommendations as checkboxes — one
+  question for the core workflow, one for situational skills (respect the
+  4-options-per-question cap; split across questions if needed). Any subset is
+  valid, including none. Skills that auto-trigger on their own (their description
+  says so) don't need to be options.
+- Otherwise, print a numbered list and ask the user to reply with numbers,
+  "all", or "none".
+
+On accept, make it stick — three actions:
+
+1. **Write `LOADOUT.md`** at the project root: the report plus an `## Accepted`
+   section listing the chosen skills with their stages.
+2. **Wire it into the project's agent config** so every future session in any
+   harness applies it without being asked. Append (or create the file with) a
+   `## Loadout` section in `AGENTS.md` — and mirror it in `CLAUDE.md` if that
+   file exists:
+
+   ```markdown
+   ## Loadout
+   Accepted skill workflow for this project (details in LOADOUT.md):
+   - <stage>: invoke `<skill>`
+   - ...
+   Invoke these at their stage without being asked. Do not use skills
+   listed under "Skip" in LOADOUT.md for this project.
+   ```
+
+3. **Apply it now**: follow the accepted loadout for the rest of the current
+   session, starting immediately.
+
+Honest limit: there is no portable mechanism to force-load skills into a
+harness's runtime. The config file IS the activation — every agent reads it at
+session start and self-directs. If the user accepts a skill listed under Gaps
+(not installed), install it first, with explicit confirmation.
+
 ## Notes for specific hosts
 
 - **Claude Code**: the harness also exposes plugins/MCP in-session; the scanner's

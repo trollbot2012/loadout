@@ -29,6 +29,9 @@ Copy the folder into your harness's skills dir:
 | DeepSeek Harness (and any `.agents`-standard host) | `~/.agents/skills/loadout/` |
 
 Then invoke: `/loadout` (or "audit my harness and recommend a workflow").
+After the report, pick which recommendations to accept (checkbox picker where
+the harness has one, numbered list otherwise); accepted skills are written into
+the project's `AGENTS.md`/`CLAUDE.md` so every future session auto-applies them.
 
 Or let it install itself everywhere at once (copies into every detected harness
 with a `skills/` dir):
