@@ -9,6 +9,7 @@ loadout into the project's agent config, and starts the work.
 - `SKILL.md` — the skill (portable agent-skills format)
 - `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment)
 - `scripts/apply.py` — idempotent writer for the `## Loadout` section (AGENTS.md + native file)
+- `scripts/gate.py` — Claude Code hook that makes the accepted loadout binding (deny edits before stage 1, block stopping while a binding stage is missing)
 
 ## Why an invoked skill, not a hook or plugin
 
@@ -48,6 +49,23 @@ the harness has one, numbered list otherwise). Accepted skills are written to
 host's native instruction file (`CLAUDE.md` with an `@AGENTS.md` import, `GEMINI.md`,
 `QWEN.md`). Re-audits replace the section instead of adding another. The run ends by naming the
 first task and starting it, not by saving a file.
+
+## Enforcement (Claude Code)
+
+`apply.py --host claude-code` also registers `scripts/gate.py` as a PreToolUse and Stop hook
+in the project's `.claude/settings.local.json` (local: the command embeds this machine's
+path). From the next session the agent cannot edit files, or run a write-shaped shell
+command, before the stage-1 skill has been invoked, and cannot stop while any binding stage
+(every Accepted line not labelled `situational`) was never invoked. The ledger is the
+session transcript; there is no state file and no agent-side override.
+
+Operator hatch: `LOADOUT_ENFORCE=0` in the environment, or remove LOADOUT.md. Skip
+registration with `--no-enforce`. Writes to LOADOUT.md, AGENTS.md and CLAUDE.md are gated
+like any other edit once the gate is active; only an exact `apply.py` invocation is allowed
+as a re-bootstrap, so a re-audit on an enforced project needs the stage-1 skill first or the
+hatch. Ceilings: Claude Code overrides a Stop hook after 8 consecutive blocks without
+progress; the shell write check is a heuristic that can misfire on an innocent command and
+does not see writes made by an arbitrary script. Other hosts keep prose wiring in this version.
 
 Self-install, check and update from a source checkout:
 
