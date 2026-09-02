@@ -94,6 +94,19 @@ def imports_agents(path):
         return False
 
 
+def upsert_native(path, blk):
+    """A CLAUDE.md that imports AGENTS.md stays import-only: the section lives in AGENTS.md,
+    and Claude Code would otherwise read it twice. Any duplicate left by an older apply is removed."""
+    if path.name == "CLAUDE.md" and imports_agents(path):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = SECTION_RE.search(text)
+        if not m:
+            return "imports AGENTS.md (unchanged)"
+        path.write_text((text[:m.start()] + text[m.end():]).rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+        return "duplicate ## Loadout removed (imports AGENTS.md)"
+    return upsert(path, blk)
+
+
 def upsert(path, blk, create_with=None):
     """Replace the ## Loadout section, else append it, else create the file. Returns the action."""
     if path.is_file():
@@ -127,13 +140,13 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
     if native:
         path = project / native
         if host == "claude-code" and not path.is_file():
-            path.write_text("@AGENTS.md\n", encoding="utf-8")
+            path.write_text("@AGENTS.md\n", encoding="utf-8", newline="\n")
             results[native] = "created with @AGENTS.md import"
         else:
-            results[native] = upsert(path, blk)
+            results[native] = upsert_native(path, blk)
     for other in NATIVE.values():
         if other != native and (project / other).is_file():
-            results[other] = upsert(project / other, blk)
+            results[other] = upsert_native(project / other, blk)
     if gate:
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     return results
