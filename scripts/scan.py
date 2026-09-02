@@ -722,6 +722,11 @@ def markdown(inv, brief=False):
                 if len(entries) > MAX_LIST:
                     lines.append(f"- …and {len(entries) - MAX_LIST} more")
             else:
+                if kind == "hooks":  # foreign hosts: event names only, so collapse repeats
+                    seen = {}
+                    for e in entries:
+                        seen[e["name"]] = seen.get(e["name"], 0) + 1
+                    entries = [{"name": k + (f" ×{n}" if n > 1 else "")} for k, n in seen.items()]
                 names = ", ".join(e["name"] + (" (off)" if e.get("status") else "") for e in entries[:40])
                 more = f", …+{len(entries) - 40}" if len(entries) > 40 else ""
                 lines.append(f"- {kind}: {names}{more}")

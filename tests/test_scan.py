@@ -370,3 +370,10 @@ def test_brief_keeps_only_the_first_sentence_of_a_description(tmp_path):
     brief = run_scan(h, ["--brief", str(proj)]).stdout
     assert "- **longskill** — Does one thing well.\n" in brief
     assert "Use when the user asks" not in brief
+
+
+def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    out = run_scan(h, [str(proj)], host="codex").stdout  # claude-code is now a foreign host
+    assert "- hooks: PostToolUse, SessionStart ×3\n" in out
+    assert "SessionStart, SessionStart" not in out

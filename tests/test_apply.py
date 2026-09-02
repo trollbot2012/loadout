@@ -8,6 +8,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import apply  # noqa: E402
+import scan  # noqa: E402
 
 LOADOUT = ("# Loadout: x\nHarness: claude-code | Project type: cli\nDate: 2026-09-02\n\n"
            "## Recommended workflow\n1. plan → `planner` — why\n\n"
@@ -76,3 +77,8 @@ def test_cli(tmp_path):
     assert "- AGENTS.md: created" in r.stdout and "- CLAUDE.md: created with @AGENTS.md import" in r.stdout
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py")], capture_output=True, encoding="utf-8")
     assert r.returncode == 2
+
+
+def test_native_file_table_matches_the_scanner():
+    # guard against the two copies drifting when a host is added to scan.py only
+    assert apply.NATIVE == scan.NATIVE_FILES
