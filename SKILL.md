@@ -44,7 +44,7 @@ The output is ordered by decision relevance:
    recommend a marked skill without saying it must be re-enabled first.
 4. Other harnesses (names only), other skills roots, **cross-host coverage**, MCP.
 
-Flags: `--brief` (current host + project only, shorter descriptions; run this first when
+Flags: `--brief` (current host + project only, first sentence of each description; run this first when
 the host has more than ~50 skills), `--json`. The scanner reads names,
 frontmatter and config keys only, never credential values.
 

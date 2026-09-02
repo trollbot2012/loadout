@@ -56,6 +56,9 @@ def make_fixture(tmp_path):
     write(h / ".claude/skills/multiline/SKILL.md",
           "---\nname: multiline\ndescription: First line of plain scalar\n"
           "  continues with the Use when trigger\nlicense: MIT\n---\n")
+    write(h / ".claude/skills/longskill/SKILL.md",
+          "---\ndescription: Does one thing well. Use when the user asks for the thing. "
+          "Not for the other thing.\n---\n")
     write(h / ".claude/skills/unicodeskill/SKILL.md",
           "---\ndescription: arrows → and dashes — survive\n---\n")
     write(h / ".claude/skills/bigmeta/SKILL.md",
@@ -358,3 +361,12 @@ def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
     out = running("notahost")
     assert "Running inside: **unknown**" in out
     assert "notahost" in out and "claude-code" in out.split("Running inside")[1].split("\n")[0]
+
+
+def test_brief_keeps_only_the_first_sentence_of_a_description(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    full = run_scan(h, [str(proj)]).stdout
+    assert "**longskill** — Does one thing well. Use when the user asks for the thing." in full
+    brief = run_scan(h, ["--brief", str(proj)]).stdout
+    assert "- **longskill** — Does one thing well.\n" in brief
+    assert "Use when the user asks" not in brief

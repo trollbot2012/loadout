@@ -641,12 +641,16 @@ def build_inventory(project_dir):
 
 # ---------------------------------------------------------------- output
 
-def fmt_entry(e, desc_cap=MAX_DESC):
+def fmt_entry(e, desc_cap=MAX_DESC, brief=False):
     s = f"- **{e['name']}**"
     if e.get("status"):
         s += f" ({e['status']})"
-    if e.get("desc"):
-        s += f" — {e['desc'][:desc_cap]}"
+    desc = e.get("desc")
+    if desc:
+        if brief:  # first sentence only: enough to classify, short enough for 100+ skills
+            desc = re.split(r"(?<=[.!?])\s+", desc, maxsplit=1)[0]
+            desc_cap = 160
+        s += f" — {desc[:desc_cap]}"
     return s
 
 
@@ -714,7 +718,7 @@ def markdown(inv, brief=False):
         for kind, entries in data["assets"].items():
             if host == cur or cur == "unknown":
                 lines.append(f"### {kind}")
-                lines.extend(fmt_entry(e, 200 if brief else MAX_DESC) for e in entries[:MAX_LIST])
+                lines.extend(fmt_entry(e, brief=brief) for e in entries[:MAX_LIST])
                 if len(entries) > MAX_LIST:
                     lines.append(f"- …and {len(entries) - MAX_LIST} more")
             else:
