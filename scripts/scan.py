@@ -20,7 +20,7 @@ from pathlib import Path
 MAX_DESC = 400      # chars of description kept (trigger text usually sits past 160)
 MAX_LIST = 200
 MAX_HEAD = 16384    # bytes of SKILL.md read for frontmatter
-SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py"]
+SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py", "scripts/gate.py"]
 
 
 def _root(env_var, default):
@@ -566,6 +566,13 @@ def project_info(proj):
             if f == "CLAUDE.md":
                 d["imports_agents_md"] = bool(re.search(r"^@AGENTS\.md\s*$", text, re.M))
             lo[f] = d
+    local = proj / ".claude" / "settings.local.json"  # apply.py registers the gate hooks here
+    if local.is_file():
+        try:
+            if "gate.py" in local.read_text(encoding="utf-8", errors="replace"):
+                lo["gate"] = "claude-code"
+        except OSError:
+            pass
     if lo:
         info["loadout"] = lo
     return info
@@ -688,12 +695,14 @@ def markdown(inv, brief=False):
         bits = []
         if "LOADOUT.md" in lo:
             bits.append("LOADOUT.md exists" + (f" (dated {lo['LOADOUT.md']['date']})" if lo["LOADOUT.md"]["date"] else ""))
-        secs = [f for f, d in lo.items() if f != "LOADOUT.md" and d.get("loadout_section")]
+        secs = [f for f, d in lo.items() if f not in ("LOADOUT.md", "gate") and d.get("loadout_section")]
         if secs:
             bits.append("## Loadout section in " + ", ".join(secs))
         if "CLAUDE.md" in lo:
             bits.append("CLAUDE.md imports AGENTS.md" if lo["CLAUDE.md"].get("imports_agents_md")
                         else "CLAUDE.md does not import AGENTS.md")
+        if lo.get("gate"):
+            bits.append(f"enforcement gate registered ({lo['gate']})")
         lines.append("- **prior loadout (re-audit)**: " + "; ".join(bits))
     if not p.get("files") and not p.get("assets"):
         lines.append("- no project-level agent config found")

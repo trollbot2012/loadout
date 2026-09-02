@@ -9,6 +9,7 @@ loadout into the project's agent config, and starts the work.
 - `SKILL.md` — the skill (portable agent-skills format)
 - `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment)
 - `scripts/apply.py` — idempotent writer for the `## Loadout` section (AGENTS.md + native file)
+- `scripts/gate.py` — Claude Code hook that makes the accepted loadout binding (deny edits before stage 1, block stopping while a binding stage is missing)
 
 ## Why an invoked skill, not a hook or plugin
 
@@ -48,6 +49,28 @@ the harness has one, numbered list otherwise). Accepted skills are written to
 host's native instruction file (`CLAUDE.md` with an `@AGENTS.md` import, `GEMINI.md`,
 `QWEN.md`). Re-audits replace the section instead of adding another. The run ends by naming the
 first task and starting it, not by saving a file.
+
+## Enforcement (Claude Code)
+
+`apply.py --host claude-code` also registers `scripts/gate.py` as a PreToolUse and Stop hook
+in the project's `.claude/settings.local.json` (local: the command embeds this machine's
+path). From the next session the agent cannot edit files, or run a write-shaped shell
+command, before the stage-1 skill has been invoked, and cannot stop while any binding stage
+(every Accepted line not labelled `situational`) was never invoked. The ledger is the
+session transcript; there is no state file and no agent-side override. A denied edit attempt
+still counts as an edit for the Stop gate: an agent that tried to mutate must run the workflow.
+
+Operator hatch: `LOADOUT_ENFORCE=0` in the environment, or remove LOADOUT.md. Skip
+registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md,
+`.claude/settings*.json`, gate.py, apply.py) is operator-owned: the agent cannot write to it
+at any stage, only the exact `apply.py` bootstrap invocation of this skill's own apply.py
+passes, and a re-audit that changes the accepted set runs under the hatch. Ceilings: the gate
+stops blocking after 8 consecutive Stop blocks with no skill invoked in between, counted from
+the session transcript itself (nothing on disk, so a fresh session inherits nothing; Claude Code
+has the same override); the shell write check is a heuristic that can misfire on an innocent
+command and does not see writes made by an arbitrary script file; a delegated subagent is
+gated against the parent session's transcript; the transcript may lag the last tool call.
+Other hosts keep prose wiring in this version.
 
 Self-install, check and update from a source checkout:
 
