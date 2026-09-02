@@ -11,9 +11,12 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - any other native file that already exists in the project (keeps every harness consistent).
   - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
     .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
+  - on codex, the same gate in the user-level ~/.codex/hooks.json ($CODEX_HOME honoured):
+    project-level Codex hooks need a trusted project, and the gate is a no-op without LOADOUT.md.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,6 +25,9 @@ NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 GATE = Path(__file__).resolve().parent / "gate.py"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
+CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
+CODEX_NOTE = (" (Codex loads hooks at the next session; untrusted hooks are skipped until trusted in /hooks"
+              " or run with --dangerously-bypass-hook-trust)")
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
@@ -37,8 +43,18 @@ def gate_hooks():
             "Stop": [{"hooks": [{"type": "command", "command": cmd("stop")}]}]}
 
 
+def codex_gate_hooks():
+    """Same gate for Codex CLI, in its Claude-shaped hooks.json. No PreToolUse matcher: Codex tool names
+    differ from Claude's, so the gate decides by name itself. Codex runs hooks through PowerShell on
+    Windows, where a quoted path at command position needs the call operator; bash takes the plain form."""
+    def entry(mode):
+        posix = f'"{sys.executable}" "{GATE}" {mode} --host codex'
+        return {"hooks": [{"type": "command", "command": posix, "command_windows": "& " + posix, "timeout": 20}]}
+    return {"PreToolUse": [entry("pre")], "Stop": [entry("stop")]}
+
+
 def load_settings(path):
-    """Parsed settings.local.json, or {} when absent. Validated up front so a bad file fails before any write."""
+    """Parsed hooks JSON, or {} when absent. Validated up front so a bad file fails before any write."""
     if not path.is_file():
         return {}
     try:
@@ -47,17 +63,14 @@ def load_settings(path):
         raise ValueError(f"{path} is not valid JSON; fix it or pass --no-enforce")
 
 
-def register_gate(project, data=None):
-    """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
-    path = Path(project) / SETTINGS_LOCAL
-    existed = path.is_file()
-    data = load_settings(path) if data is None else data
-    hooks = data.setdefault("hooks", {})
+def upsert_hooks(hooks, wanted):
+    """Replace our own gate hooks under each event in `hooks` (mutated) with `wanted`; every other hook
+    survives, including siblings inside the same entry. Returns whether anything changed."""
     changed = False
-    for event, entries in gate_hooks().items():
+    for event, entries in wanted.items():
         current = hooks.get(event, [])
         kept = []
-        for e in current:  # drop only our own hook commands; sibling hooks in the same entry survive
+        for e in current:
             inner = [h for h in e.get("hooks", []) if "gate.py" not in h.get("command", "")]
             if inner:
                 kept.append({**e, "hooks": inner} if len(inner) != len(e.get("hooks", [])) else e)
@@ -65,11 +78,31 @@ def register_gate(project, data=None):
         if new != current:
             hooks[event] = new
             changed = True
+    return changed
+
+
+def write_hooks(path, data, existed, changed):
     if existed and not changed:
         return "unchanged"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    write_lf(path, json.dumps(data, indent=2) + "\n")
     return "updated" if existed else "created"
+
+
+def register_gate(project, data=None):
+    """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
+    path = Path(project) / SETTINGS_LOCAL
+    existed = path.is_file()
+    data = load_settings(path) if data is None else data
+    return write_hooks(path, data, existed, upsert_hooks(data.setdefault("hooks", {}), gate_hooks()))
+
+
+def register_codex_gate(path=None, data=None):
+    """Upsert the gate hooks into the user-level Codex hooks.json (events live at the top level)."""
+    path = Path(path or CODEX_HOOKS)
+    existed = path.is_file()
+    data = load_settings(path) if data is None else data
+    return write_hooks(path, data, existed, upsert_hooks(data, codex_gate_hooks()))
 
 
 def parse_accepted(text):
@@ -140,7 +173,9 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
     gate = enforce and host == "claude-code"
+    codex = enforce and host == "codex"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
+    codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
@@ -155,6 +190,8 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
             results[other] = upsert_native(project / other, blk)
     if gate:
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
+    if codex:
+        results["~/.codex/hooks.json"] = register_codex_gate(CODEX_HOOKS, codex_settings) + CODEX_NOTE
     return results
 
 
