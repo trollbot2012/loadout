@@ -39,7 +39,7 @@ def transcript(tmp_path, blocks, name="t.jsonl"):
             lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": item}}))
         else:
             lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": item}}))
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    p.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))  # LF on every platform, 3.9-safe
     return p
 
 
@@ -68,8 +68,7 @@ def test_transcript_facts_collects_skills_and_edits(tmp_path):
 
 def test_transcript_facts_tolerates_garbage(tmp_path):
     p = tmp_path / "bad.jsonl"
-    p.write_text('not json\n{"message": 5}\n' + json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "x"}}]}}) + "\n",
-                 encoding="utf-8", newline="\n")
+    p.write_bytes(('not json\n{"message": 5}\n' + json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "x"}}]}}) + "\n").encode("utf-8"))
     assert gate.transcript_facts(p) == ({"x"}, False)
     assert gate.transcript_facts(tmp_path / "missing.jsonl") == (set(), False)
     assert gate.transcript_facts(None) == (set(), False)
@@ -86,7 +85,7 @@ def project(tmp_path, loadout=LOADOUT):
     proj = tmp_path / "proj" / "sub"
     proj.mkdir(parents=True)
     if loadout is not None:
-        (tmp_path / "proj" / "LOADOUT.md").write_text(loadout, encoding="utf-8", newline="\n")
+        (tmp_path / "proj" / "LOADOUT.md").write_bytes(loadout.encode("utf-8"))
     return proj
 
 

@@ -94,6 +94,12 @@ def imports_agents(path):
         return False
 
 
+def write_lf(path, text):
+    # Path.write_text(newline=) is 3.10+; the project floor is 3.9
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
 def upsert_native(path, blk):
     """A CLAUDE.md that imports AGENTS.md stays import-only: the section lives in AGENTS.md,
     and Claude Code would otherwise read it twice. Any duplicate left by an older apply is removed."""
@@ -102,7 +108,7 @@ def upsert_native(path, blk):
         m = SECTION_RE.search(text)
         if not m:
             return "imports AGENTS.md (unchanged)"
-        path.write_text((text[:m.start()] + text[m.end():]).rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+        write_lf(path, (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n")
         return "duplicate ## Loadout removed (imports AGENTS.md)"
     return upsert(path, blk)
 
@@ -140,7 +146,7 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
     if native:
         path = project / native
         if host == "claude-code" and not path.is_file():
-            path.write_text("@AGENTS.md\n", encoding="utf-8", newline="\n")
+            write_lf(path, "@AGENTS.md\n")
             results[native] = "created with @AGENTS.md import"
         else:
             results[native] = upsert_native(path, blk)
