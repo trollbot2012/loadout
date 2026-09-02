@@ -34,7 +34,9 @@ The output is ordered by decision relevance:
    (this is a re-audit; see step 3).
 2. **Running inside**: the host plus how it was detected. Env markers are
    child-shell signals, not identity; `unknown` means no reliable signal. You still
-   know which harness you are: state it, and pass `LOADOUT_HOST=<host>` for scripting.
+   know which harness you are: state it, and pass `LOADOUT_HOST=<host>` for scripting
+   (a table key such as `claude-code`, `codex`, `cursor`, `gemini`, `opencode`, `deepseek`;
+   `claude` and `dsh` are accepted aliases, anything else falls back to `unknown`).
 3. **Current host, full listing**: skills, `plugin-skills` (plugin-provided, named
    `plugin:skill`), plugins, registered hooks (from settings files and plugin hook
    manifests), commands, agents, rules. A `(off)`, `(user-invocable-only)` or

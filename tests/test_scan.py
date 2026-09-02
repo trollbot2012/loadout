@@ -339,3 +339,22 @@ def test_self_install_check_and_host_opt_in(tmp_path):
     assert r.returncode == 0 and (h / ".someagent/skills/loadout/SKILL.md").is_file()
     r = run_scan(h, ["--self-install", "--hosts", "bogus"])
     assert r.returncode == 2 and "unknown host(s): bogus" in r.stderr
+
+
+def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    def running(value, *args):
+        r = run_scan(h, [*args, str(proj)], host=value)
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+    # the obvious short names map onto the table keys, so the current-host listing survives
+    out = running("claude", "--brief")
+    assert "Running inside: **claude-code**" in out
+    assert "## claude-code" in out and "### skills" in out
+    assert "Running inside: **deepseek**" in running("dsh")
+    assert "Running inside: **Claude-Code**" not in running("Claude-Code")
+    assert "Running inside: **claude-code**" in running("Claude-Code")
+    # an unknown value is not silently taken as a host: fall back and name the valid keys
+    out = running("notahost")
+    assert "Running inside: **unknown**" in out
+    assert "notahost" in out and "claude-code" in out.split("Running inside")[1].split("\n")[0]

@@ -63,8 +63,10 @@ The scanner also runs standalone:
 python scripts/scan.py [--json] [--brief] [project_dir]
 ```
 
-Extras: `LOADOUT_HOST=<name>` overrides harness detection (env markers are child-shell
-signals and stay `unknown` without one); `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`,
+Extras: `LOADOUT_HOST=<host>` overrides harness detection (env markers are child-shell
+signals and stay `unknown` without one); the value is a table key (`claude-code`, `codex`,
+`cursor`, `gemini`, `opencode`, `crush`, `qwen`, `continue`, `copilot`, `grok`, `vibe`,
+`deepseek`, `hermes`, `zcode`), with `claude` and `dsh` as aliases; `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`,
 `VIBE_HOME`, `HERMES_HOME`, `DSH_HOME` and `XDG_CONFIG_HOME` are honoured. Output starts with the
 project (including prior-loadout signals for re-audits), then the current host's full
 listing with `(off)` markers, then cross-host coverage and MCP.

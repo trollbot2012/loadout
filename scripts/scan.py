@@ -96,6 +96,10 @@ MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod
 # env markers -> host. These are CHILD-SHELL signals the harness sets for commands it runs,
 # not a top-level identity; verified against official docs/source 2026-09-01. Codex sets its
 # markers only when sandboxed; Grok sets none outside hooks. Unknown stays unknown.
+# short names people actually type for LOADOUT_HOST -> table key
+HOST_ALIASES = {"claude": "claude-code", "claude_code": "claude-code", "claudecode": "claude-code",
+                "dsh": "deepseek", "deepseek-harness": "deepseek", "copilot-cli": "copilot"}
+
 ENV_MARKERS = [
     ("CLAUDECODE", "claude-code"), ("CLAUDE_CODE_CHILD_SESSION", "claude-code"),
     ("CURSOR_AGENT", "cursor"),
@@ -390,7 +394,11 @@ def detect_host():
     """(host, how). Env markers are child-shell signals, so 'how' names the signal."""
     override = os.environ.get("LOADOUT_HOST")
     if override:
-        return override, "LOADOUT_HOST override"
+        key = override.strip().lower()
+        key = HOST_ALIASES.get(key, key)
+        if key in HOSTS:
+            return key, "LOADOUT_HOST override"
+        return "unknown", f"LOADOUT_HOST={override!r} is not a known host; use one of {', '.join(HOSTS)}"
     for var, host in ENV_MARKERS:
         if os.environ.get(var):
             return host, f"env {var}, a child-shell signal; set LOADOUT_HOST if wrong"
