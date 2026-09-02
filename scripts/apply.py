@@ -22,6 +22,11 @@ NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 GATE = Path(__file__).resolve().parent / "gate.py"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 SETTINGS_LOCAL = ".claude/settings.local.json"
+VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
+SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
+ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
+IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
+LINE_RE = re.compile(r"^\s*[-*]\s*([^:`]+?)\s*:\s*`?([^`\s]+)`?", re.M)
 
 
 def gate_hooks():
@@ -32,20 +37,30 @@ def gate_hooks():
             "Stop": [{"hooks": [{"type": "command", "command": cmd("stop")}]}]}
 
 
-def register_gate(project):
+def load_settings(path):
+    """Parsed settings.local.json, or {} when absent. Validated up front so a bad file fails before any write."""
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise ValueError(f"{path} is not valid JSON; fix it or pass --no-enforce")
+
+
+def register_gate(project, data=None):
     """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
     path = Path(project) / SETTINGS_LOCAL
-    data, existed = {}, path.is_file()
-    if existed:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError:
-            raise ValueError(f"{path} is not valid JSON; fix it or pass --no-enforce")
+    existed = path.is_file()
+    data = load_settings(path) if data is None else data
     hooks = data.setdefault("hooks", {})
     changed = False
     for event, entries in gate_hooks().items():
         current = hooks.get(event, [])
-        kept = [e for e in current if not any("gate.py" in h.get("command", "") for h in e.get("hooks", []))]
+        kept = []
+        for e in current:  # drop only our own hook commands; sibling hooks in the same entry survive
+            inner = [h for h in e.get("hooks", []) if "gate.py" not in h.get("command", "")]
+            if inner:
+                kept.append({**e, "hooks": inner} if len(inner) != len(e.get("hooks", [])) else e)
         new = kept + entries
         if new != current:
             hooks[event] = new
@@ -55,10 +70,6 @@ def register_gate(project):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return "updated" if existed else "created"
-SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
-ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
-IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
-LINE_RE = re.compile(r"^\s*[-*]\s*([^:`]+?)\s*:\s*`?([^`\s]+)`?", re.M)
 
 
 def parse_accepted(text):
@@ -109,6 +120,8 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
     if not accepted:
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
+    gate = enforce and host == "claude-code"
+    settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
@@ -121,8 +134,8 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
     for other in NATIVE.values():
         if other != native and (project / other).is_file():
             results[other] = upsert(project / other, blk)
-    if enforce and host == "claude-code":
-        results[SETTINGS_LOCAL] = register_gate(project) + " (gate hooks take effect from the next Claude Code session)"
+    if gate:
+        results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     return results
 
 
@@ -134,8 +147,7 @@ def main():
     host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
     loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
     enforce = "--no-enforce" not in argv
-    value_flags = {"--host", "--loadout"}  # only these consume the token after them
-    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in value_flags)]
+    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)

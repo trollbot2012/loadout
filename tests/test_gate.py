@@ -19,8 +19,9 @@ def test_write_shaped_bash_commands():
     assert gate.write_shaped("ls | tee out.txt")
     assert gate.write_shaped("git checkout -- f.py")
     assert gate.write_shaped("cd x && cp a b")
-    assert gate.write_shaped("python x/apply.py ."), "names the enforcement surface"
-    assert gate.write_shaped("cat CLAUDE.md"), "conservative: naming an activation file counts"
+    assert gate.write_shaped("cmd 1> out") and gate.write_shaped("cmd &> out")
+    assert not gate.write_shaped("python x/apply.py .") and gate.sensitive("python x/apply.py .")
+    assert not gate.write_shaped("cat CLAUDE.md") and gate.sensitive("cat CLAUDE.md")
     assert not gate.write_shaped("python -m pytest -q")
     assert not gate.write_shaped("cmd 2>&1 | tail -3")
     assert not gate.write_shaped("cmd > /dev/null")
@@ -171,6 +172,36 @@ def test_slash_command_counts_as_invoked(tmp_path):
     proj = project(tmp_path)
     t = transcript(tmp_path, ["<command-name>/planner</command-name>"])
     assert run_gate("pre", pre_hook(proj, t)) is None
+
+
+def test_slash_command_counts_only_from_user_messages(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[{"type": "text", "text": "<command-name>/planner</command-name>"}]])
+    assert denied(pre_hook(proj, t)), "assistant text must not count as an invocation"
+
+
+def test_reading_the_enforcement_surface_is_not_an_edit(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[skill("planner")], [tool("Bash", command="cat CLAUDE.md"), tool("Read", file_path="AGENTS.md")]])
+    assert run_gate("stop", stop_hook(proj, t)) is None, "read-only session must not be trapped"
+    t = transcript(tmp_path, [])
+    assert denied(pre_hook(proj, t, "Bash", command="cat CLAUDE.md")), "but before stage 1 it is still gated"
+
+
+def test_pre_and_stop_through_subprocess_edge_cases(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [])
+    assert run_gate("pre", pre_hook(proj, t, "Bash", command="cmd 2>&1 >/dev/null")) is None
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not json\n", encoding="utf-8")
+    assert denied(pre_hook(proj, bad)), "garbage transcript: nothing invoked, edit still gated"
+    assert run_gate("stop", stop_hook(proj, bad)) is None, "garbage transcript: no edits seen"
+
+
+def test_broken_gate_fails_open_but_not_silently():
+    r = subprocess.run([sys.executable, str(GATE), "pre"], input="not json", capture_output=True, encoding="utf-8")
+    assert r.returncode == 0 and r.stdout == ""
+    assert "loadout gate" in r.stderr.lower() and "Traceback" in r.stderr
 
 
 def test_stop_blocks_only_after_edits_and_names_missing_stages(tmp_path):

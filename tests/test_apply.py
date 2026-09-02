@@ -132,10 +132,24 @@ def test_no_enforce_and_other_hosts_skip_registration(tmp_path):
     assert not (tmp_path / ".claude/settings.local.json").exists()
 
 
-def test_invalid_settings_json_is_an_error(tmp_path):
+def test_invalid_settings_json_is_an_error_before_any_write(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     p = tmp_path / ".claude/settings.local.json"
     p.parent.mkdir(parents=True)
     p.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
         apply.apply(tmp_path, "claude-code")
+    assert not (tmp_path / "AGENTS.md").exists() and not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_register_gate_keeps_sibling_hooks_inside_the_same_entry(tmp_path):
+    p = tmp_path / ".claude/settings.local.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "other-stop"},
+        {"type": "command", "command": 'python "old/gate.py" stop'}]}]}}), encoding="utf-8")
+    assert apply.register_gate(tmp_path) == "updated"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
+    assert "other-stop" in cmds and "old/gate.py" not in json.dumps(data)
+    assert sum("gate.py" in c for c in cmds) == 1

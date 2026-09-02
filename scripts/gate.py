@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import sys
+import traceback
 from pathlib import Path
 
 import apply  # same directory; owns the Accepted-line grammar
@@ -24,19 +25,24 @@ COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 HATCH = "Operator hatch: LOADOUT_ENFORCE=0."
 
 # a redirect that is not a 2>&1-style fd dup and not to /dev/null or NUL
-_REDIRECT = re.compile(r"(?<![<>0-9&])>{1,2}(?!&)(?!\s*(?:/dev/null|NUL\b))")
+_REDIRECT = re.compile(r"(?<![<>&])(?:>{1,2}|&>)(?!&)(?!\s*(?:/dev/null|NUL\b))")
 # a write-shaped word in command position (line start or after a shell operator)
 _WRITE_WORDS = re.compile(
     r"(?:^|[|;&])\s*(?:tee|sed\s+-i|perl\s+-i|mv|cp|install|patch|git\s+apply|git\s+checkout\s+--|git\s+restore|touch)(?=\s|$)")
 
 
-# anything that names the enforcement surface is a mutation unless it is the exact bootstrap
+# the enforcement surface: gated before stage 1 unless the command is the exact bootstrap (pre mode only)
 _SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md", re.I)
 
 
 def write_shaped(cmd):
     """True when a shell command looks like it writes a file. False positives are accepted."""
-    return bool("<<" in cmd or _REDIRECT.search(cmd) or _WRITE_WORDS.search(cmd) or _SENSITIVE.search(cmd))
+    return bool("<<" in cmd or _REDIRECT.search(cmd) or _WRITE_WORDS.search(cmd))
+
+
+def sensitive(cmd):
+    """True when a shell command names the enforcement surface. Pre-mode only: reading it is not an edit."""
+    return bool(_SENSITIVE.search(cmd))
 
 
 def transcript_facts(path):
@@ -53,14 +59,18 @@ def transcript_facts(path):
             continue
         msg = d.get("message") if isinstance(d, dict) else None
         content = msg.get("content") if isinstance(msg, dict) else None
+        # slash invocations count only from the user: an agent must not be able to write its own pass
+        is_user = d.get("type") == "user" or (isinstance(msg, dict) and msg.get("role") == "user")
         if isinstance(content, str):
-            invoked.update(COMMAND_RE.findall(content))
+            if is_user:
+                invoked.update(COMMAND_RE.findall(content))
             continue
         for block in content or []:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
-                invoked.update(COMMAND_RE.findall(block.get("text") or ""))
+                if is_user:
+                    invoked.update(COMMAND_RE.findall(block.get("text") or ""))
             elif block.get("type") == "tool_use":
                 name, inp = block.get("name"), block.get("input") or {}
                 if name == "Skill" and inp.get("skill"):
@@ -91,7 +101,6 @@ def binding_stages(text):
 
 
 _INTERPRETERS = {"python", "python3", "python.exe", "py", "py.exe"}
-_BOOTSTRAP_VALUE_FLAGS = {"--host", "--loadout"}
 
 
 def _basename(tok):
@@ -119,7 +128,7 @@ def bootstrap_invocation(cmd):
     positional, i = 0, 0
     while i < len(rest):
         tok = rest[i]
-        if tok in _BOOTSTRAP_VALUE_FLAGS:
+        if tok in apply.VALUE_FLAGS:
             if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
                 return False
             i += 2
@@ -151,7 +160,7 @@ def decide(mode, hook, env=None):
         tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
         if tool == "Bash":
             cmd = str(inp.get("command") or "")
-            if bootstrap_invocation(cmd) or not write_shaped(cmd):
+            if bootstrap_invocation(cmd) or not (write_shaped(cmd) or sensitive(cmd)):
                 return None
         elif tool not in EDIT_TOOLS:
             return None
@@ -183,7 +192,9 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
         out = decide(mode, json.load(sys.stdin))
-    except Exception:  # deliberate: a broken gate must allow, never wedge the harness
+    except Exception:  # deliberate: a broken gate must allow, never wedge the harness; but say so
+        sys.stderr.write("loadout gate: failed open (allowing) because of an internal error:\n")
+        traceback.print_exc(file=sys.stderr)
         out = None
     if out:
         sys.stdout.write(json.dumps(out))

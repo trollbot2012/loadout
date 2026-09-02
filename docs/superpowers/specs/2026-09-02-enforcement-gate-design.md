@@ -138,3 +138,24 @@ existing unrelated hooks preserved, `--no-enforce` skips.
 
 Codex / Cursor / Gemini gates (stop-hook blocking semantics unverified), per-line
 `(required)` markers, any agent-side override.
+
+## Implementation notes (post-review, 2026-09-02)
+
+Amendments the code review surfaced; the code is the reference for these:
+
+- Slash-command invocations count only from user messages (transcript `type == "user"`), so an
+  agent cannot write `<command-name>/x</command-name>` in its own text to pass the gate.
+- Naming the enforcement surface (`apply.py`, `gate.py`, `settings.local.json`, LOADOUT.md,
+  AGENTS.md, CLAUDE.md) is gated in `pre` mode only; it does not mark the session as edited, so a
+  read-only session that merely reads those files is never trapped by Stop.
+- The hook command is `"<sys.executable>" "<skill-dir>/scripts/gate.py" <mode>`, not bare
+  `python`, so it works where `python` is not on PATH. That is why the file is local.
+- `register_gate` returns `created | updated | unchanged`; it removes only its own hook commands and
+  keeps sibling hooks inside the same matcher entry. `settings.local.json` is parsed before any
+  file is written, so a corrupt file fails the whole apply cleanly.
+- Redirects `1>` and `&>` count as write-shaped; `2>&1` and `>/dev/null` do not.
+- A gate that hits an internal error still allows (exit 0, no stdout) but prints the traceback to
+  stderr, so a broken gate is visible in hook debug output rather than a silent no-op.
+- Additions beyond the original spec, kept: the scanner reports `enforcement gate registered
+  (claude-code)` in the project section for re-audits; `.claude/settings.local.json` is gitignored
+  because it embeds machine paths.
