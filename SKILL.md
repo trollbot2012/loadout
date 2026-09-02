@@ -4,7 +4,7 @@ description: Audit the current coding agent/harness (installed skills, plugins, 
 license: MIT
 compatibility: Requires Python 3.9+ (stdlib only) on Windows, macOS or Linux, and a harness that can run a shell command and read markdown.
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
 ---
 
 # Loadout: Harness Audit → Workflow Recommendation
@@ -139,7 +139,7 @@ auto-trigger exemption: a skill that self-triggers is still listed, with that no
 - If the harness has a native multi-select prompt (Claude Code: AskUserQuestion
   with `multiSelect: true`), present the recommendations as checkboxes — one
   question for the core workflow, one for situational skills (respect the
-  4-options-per-question cap; split across questions if needed). Any subset is
+  4-options-per-question cap; split in workflow order, four per question). Any subset is
   valid, including none; include a "none of these" option where the prompt
   cannot express an empty selection.
 - Otherwise, print a numbered list and ask the user to reply with numbers,
@@ -199,7 +199,9 @@ run. After applying, immediately do all three:
 3. **On either start answer, begin in the same turn**: invoke the accepted stage-1
    skill on that task right away, then move through the accepted stages as the work
    reaches them. Do not ask again, do not restate the report, do not wait for a
-   further go-ahead.
+   further go-ahead. Stop only when the next stage needs a decision that is the
+   user's to make (a requirements choice, a money or security policy); say where
+   you stopped and what decision unblocks it.
 
    On save-only, say plainly that the loadout takes effect from the next session or
    task in any harness that reads the config file, and stop there.
