@@ -162,9 +162,13 @@ _WRITE_WORDS = re.compile(
     r"(?:^|[|;&]\s*)(?:tee|sed\s+-i|perl\s+-i|mv|cp|install|patch|git\s+apply|git\s+checkout\s+--|git\s+restore|touch)\b")
 
 
+# anything that names the enforcement surface is a mutation unless it is the exact bootstrap
+_SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md", re.I)
+
+
 def write_shaped(cmd):
     """True when a shell command looks like it writes a file. False positives are accepted."""
-    return bool("<<" in cmd or _REDIRECT.search(cmd) or _WRITE_WORDS.search(cmd))
+    return bool("<<" in cmd or _REDIRECT.search(cmd) or _WRITE_WORDS.search(cmd) or _SENSITIVE.search(cmd))
 
 
 def transcript_facts(path):

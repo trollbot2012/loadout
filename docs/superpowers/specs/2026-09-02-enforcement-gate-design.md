@@ -81,8 +81,11 @@ contributes `x`. Match is exact against the accepted skill string.
 Write-shaped Bash command (regex, single source of truth in gate.py): a redirect `>` or
 `>>` that is not `2>&1`, `>/dev/null`, `> NUL`; a heredoc `<<`; or a leading/`|`/`&&`/`;`
 -separated word in {`tee`, `sed -i`, `perl -i`, `mv`, `cp`, `install`, `patch`,
-`git apply`, `git checkout --`, `git restore`, `touch`}. False positives are accepted and
-named in the deny reason; the hatch is the recourse.
+`git apply`, `git checkout --`, `git restore`, `touch`}; or any mention of `apply.py`, `gate.py`,
+`settings.local.json`, `LOADOUT.md`, `AGENTS.md` or `CLAUDE.md` (the enforcement surface is a
+mutation unless the command is the exact bootstrap). False positives are accepted and
+named in the deny reason; the hatch is the recourse. Ceiling: an arbitrary script that writes
+files (`python other.py`) is not write-shaped.
 
 Never raises: any parse error (bad JSON, unreadable transcript, malformed LOADOUT.md)
 allows with exit 0. Enforcement must not break the harness.
