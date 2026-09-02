@@ -48,6 +48,8 @@ HOSTS = {
     "grok":        (_root("GROK_HOME", "~/.grok"),
                     {"skills": "skills", "plugins": "installed-plugins", "hooks": "hooks"}),
     "vibe":        (_root("VIBE_HOME", "~/.vibe"), {"skills": "skills"}),
+    # DeepSeek Harness: own skills dir; reads project AGENTS.md/CLAUDE.md + $DSH_HOME/AGENTS.md
+    "deepseek":    (_root("DSH_HOME", "~/.dsh"), {"skills": "skills"}),
     "hermes":      (_root("HERMES_HOME", "~/.hermes"), {"skills": "skills"}),
 }
 # ~/.agents/skills: the cross-agent shared pool. Not a harness of its own.
@@ -55,7 +57,8 @@ SHARED = "agents-shared"
 SHARED_ROOT = "~/.agents"
 # hosts whose official docs say they read ~/.agents/skills natively (verified 2026-09-01)
 SHARED_READERS = {"codex", "gemini", "cursor", "opencode", "copilot", "grok", "crush"}
-HOST_NOTES = {"codex": "~/.codex/skills is legacy (still read); Codex prefers ~/.agents/skills"}
+HOST_NOTES = {"codex": "~/.codex/skills is legacy (still read); Codex prefers ~/.agents/skills",
+              "deepseek": "DeepSeek Harness; reads project AGENTS.md/CLAUDE.md natively"}
 
 # hosts whose hook registrations live in a JSON file (Claude: settings stack, others: one file)
 HOOK_JSON = {

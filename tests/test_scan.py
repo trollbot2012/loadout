@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import scan  # noqa: E402  (constants only; the scanner itself runs as a subprocess)
 
 SCRUB = ["LOADOUT_HOST", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "VIBE_HOME",
-         "HERMES_HOME", "XDG_CONFIG_HOME"] + [v for v, _ in scan.ENV_MARKERS]
+         "HERMES_HOME", "DSH_HOME", "XDG_CONFIG_HOME"] + [v for v, _ in scan.ENV_MARKERS]
 
 
 def run_scan(home, args, env=None, host="claude-code"):
@@ -110,6 +110,8 @@ def make_fixture(tmp_path):
     # --- shared pool and roots outside the table
     write(h / ".agents/skills/plainskill/SKILL.md", "---\ndescription: shared copy\n---\n")
     write(h / ".agents/skills/poolonly/SKILL.md", "---\ndescription: only in the shared pool\n---\n")
+    write(h / ".dsh/skills/dshskill/SKILL.md", "---\ndescription: a deepseek harness skill\n---\n")
+    write(h / ".dsh/skills/plainskill/SKILL.md", "---\ndescription: on deepseek too\n---\n")
     write(h / ".someagent/skills/plainskill/SKILL.md", "---\ndescription: elsewhere\n---\n")
     write(h / ".pi/agent/skills/plainskill/SKILL.md", "---\ndescription: nested root\n---\n")
     return h, proj
@@ -232,6 +234,23 @@ def test_discovered_roots_and_brief(tmp_path):
     assert "## claude-code" in brief and "### skills" in brief
     assert "## codex" not in brief
     assert ".someagent (1)" in brief
+
+
+def test_deepseek_harness_is_a_first_class_host(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    inv = scan_json(h, proj)
+    ds = inv["hosts"]["deepseek"]
+    assert [e["name"] for e in ds["assets"]["skills"]] == ["dshskill", "plainskill"]
+    assert not ds.get("discovered"), "deepseek is in the host table, not merely discovered"
+    assert "deepseek" not in (inv["cross_host"]["shared_readers"] or []), "no evidence it reads ~/.agents"
+    assert "reads project AGENTS.md" in run_scan(h, [str(proj)]).stdout
+    # self-install reaches it, and DSH_HOME relocates it
+    assert run_scan(h, ["--self-install"]).returncode == 0
+    assert (h / ".dsh/skills/loadout/SKILL.md").is_file()
+    alt = tmp_path / "altdsh"
+    (alt / "skills").mkdir(parents=True)
+    r = run_scan(h, ["--json", str(proj)], env={"DSH_HOME": str(alt)})
+    assert Path(json.loads(r.stdout)["hosts"]["deepseek"]["root"]) == alt
 
 
 def test_codex_legacy_note_and_configurable_home(tmp_path):

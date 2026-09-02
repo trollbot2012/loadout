@@ -1,16 +1,17 @@
 ---
 name: loadout
-description: Audit the current coding agent/harness (installed skills, plugins, hooks, commands, agents, MCP servers) and recommend the best workflow of skills for the project being built. Use at project start, when returning to a project, or when the user says "audit my harness", "what skills should I use", "recommend a workflow", "loadout", or asks which of their installed tools fit this project.
+description: Audit the current coding agent/harness (installed skills, plugins, hooks, commands, agents, MCP servers), recommend the best workflow of skills for the project being built, wire the accepted set into the project config, and start the work. Use at project start, when returning to a project, or when the user says "audit my harness", "what skills should I use", "recommend a workflow", "loadout", or asks which of their installed tools fit this project.
 license: MIT
 compatibility: Requires Python 3.9+ (stdlib only) on Windows, macOS or Linux, and a harness that can run a shell command and read markdown.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Loadout: Harness Audit → Workflow Recommendation
 
 Portable skill. Works in any harness that can run Python and read markdown
-(Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Qwen Code, Grok, Crush, Copilot, …).
+(Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Qwen Code, Grok, Crush, Copilot,
+DeepSeek Harness, …).
 
 ## Workflow
 
@@ -170,14 +171,40 @@ On accept, make it stick — three actions:
    listed under "Skip" in LOADOUT.md for this project.
    ```
 
-3. **State the guarantee honestly**: the config file IS the activation. It takes
-   effect from the next session or task in any harness that reads that file. If
-   this session continues with implementation work, follow the accepted loadout
-   from now on; if the session ends with the audit, say so rather than claiming
-   the loadout was applied.
+3. Go straight to step 6. Do not stop here and do not re-summarize the report.
 
 If the user accepts a skill listed under Gaps (not installed), install it first,
 with explicit confirmation.
+
+### 6. Confirm and start the work (the last step, and not optional)
+
+The audit exists to change what happens next. Ending at a saved file is a failed
+run. After applying, immediately do all three:
+
+1. **Name the first task** from project state, taking the first that applies:
+   - in-flight work: uncommitted changes, a branch ahead of its remote, a
+     half-finished feature named in the changelog or a plan file
+   - something broken: failing tests, a red build, a bug the user reported
+   - a written next step: task_plan.md, an Unreleased changelog entry, a README
+     roadmap, open issues via the repo CLI
+   - nothing found: ask the user what they want built first, and nothing else.
+2. **Ask one final question** that confirms the loadout and starts the work in the
+   same answer. It is the last question of the selection sequence, and the start
+   option comes first:
+   - `Start now — <stage-1 skill> on <named task>` (recommended)
+   - `Start now, on something else` (the user names it)
+   - `Save the loadout only, do not start`
+
+   Where the harness has no prompt, print these as a numbered list and act on the reply.
+3. **On either start answer, begin in the same turn**: invoke the accepted stage-1
+   skill on that task right away, then move through the accepted stages as the work
+   reaches them. Do not ask again, do not restate the report, do not wait for a
+   further go-ahead.
+
+   On save-only, say plainly that the loadout takes effect from the next session or
+   task in any harness that reads the config file, and stop there.
+
+Never claim the loadout was "applied" to work you did not actually start.
 
 ## Self-install, check, update
 
@@ -197,6 +224,9 @@ exits 1 when any copy is stale or missing.
   disk view may include skills not loaded in this session and vice versa. Prefer
   the in-session skill list for "what can I invoke right now", the scanner for
   "what is installed on this machine" and for the off/on markers.
+- **DeepSeek Harness**: skills live in `~/.dsh/skills` (`$DSH_HOME` overrides). It reads
+  project `AGENTS.md` and `CLAUDE.md` natively, so step 5's wiring activates there with
+  no extra file.
 - **Codex**: `~/.codex/skills` is legacy but still read; Codex prefers the shared
   `~/.agents/skills`, which the scanner credits to every host whose docs say it
   reads that dir (Codex, Gemini, Cursor, OpenCode, Copilot, Grok, Crush). Claude

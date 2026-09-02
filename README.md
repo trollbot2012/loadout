@@ -3,8 +3,8 @@
 Universal harness-audit skill: inventories the coding agent you're running in
 (skills, plugin-provided skills, plugins, registered hooks, commands, agents, MCP servers,
 with on/off state — across every harness installed on the machine), then recommends
-the best workflow of skills for the project you're building and wires the accepted
-loadout into the project's agent config.
+the best workflow of skills for the project you're building, wires the accepted
+loadout into the project's agent config, and starts the work.
 
 - `SKILL.md` — the skill (portable agent-skills format)
 - `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment)
@@ -35,6 +35,7 @@ Or copy the folder into your harness's skills dir manually:
 | Gemini CLI | `~/.gemini/skills/loadout/` or `~/.agents/skills/loadout/` |
 | Copilot CLI | `~/.copilot/skills/loadout/` or `~/.agents/skills/loadout/` |
 | Grok / Crush | their `skills/` dir or `~/.agents/skills/loadout/` |
+| DeepSeek Harness | `~/.dsh/skills/loadout/` (`$DSH_HOME` overrides) |
 | Qwen / Continue / Vibe / Hermes | their respective `skills/` dir |
 
 `~/.agents/skills` is the shared pool read natively by Codex, Gemini, Cursor, OpenCode,
@@ -45,7 +46,8 @@ After the report, every recommendation is offered for selection (checkbox picker
 the harness has one, numbered list otherwise). Accepted skills are written to
 `LOADOUT.md` and, via `scripts/apply.py`, into the project's `AGENTS.md` and the running
 host's native instruction file (`CLAUDE.md` with an `@AGENTS.md` import, `GEMINI.md`,
-`QWEN.md`). Re-audits replace the section instead of adding another.
+`QWEN.md`). Re-audits replace the section instead of adding another. The run ends by naming the
+first task and starting it, not by saving a file.
 
 Self-install, check and update from a source checkout:
 
@@ -63,7 +65,7 @@ python scripts/scan.py [--json] [--brief] [project_dir]
 
 Extras: `LOADOUT_HOST=<name>` overrides harness detection (env markers are child-shell
 signals and stay `unknown` without one); `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`,
-`VIBE_HOME`, `HERMES_HOME` and `XDG_CONFIG_HOME` are honoured. Output starts with the
+`VIBE_HOME`, `HERMES_HOME`, `DSH_HOME` and `XDG_CONFIG_HOME` are honoured. Output starts with the
 project (including prior-loadout signals for re-audits), then the current host's full
 listing with `(off)` markers, then cross-host coverage and MCP.
 
