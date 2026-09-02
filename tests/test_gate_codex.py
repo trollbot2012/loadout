@@ -104,3 +104,71 @@ def test_is_codex_transcript(tmp_path):
     assert gate_codex.is_codex_transcript(rollout(tmp_path, ["", meta()], name="s2.jsonl"))
     assert not gate_codex.is_codex_transcript(tmp_path / "nope.jsonl")
     assert not gate_codex.is_codex_transcript(None)
+
+
+# ---------------------------------------------------------------- gate.py end to end with --host codex
+
+import os
+import subprocess
+
+GATE = REPO / "scripts" / "gate.py"
+LOADOUT = "# Loadout: x\n\n## Accepted\n- planning: `planner`\n- review: `reviewer`\n- situational, x: `unlazy`\n"
+
+
+def project(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
+    return proj
+
+
+def run_gate(mode, hook, host=None):
+    e = {k: v for k, v in os.environ.items() if k != "LOADOUT_ENFORCE"}
+    args = [sys.executable, str(GATE), mode] + (["--host", host] if host else [])
+    r = subprocess.run(args, input=json.dumps(hook), capture_output=True, encoding="utf-8", env=e)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+def codex_hook(proj, t, mode, **extra):
+    # exactly the shape Codex hands a hook (recorded live 2026-09-02): Claude-style tool_name/tool_input
+    base = {"session_id": "s1", "turn_id": "t1", "transcript_path": str(t), "cwd": str(proj),
+            "hook_event_name": "PreToolUse" if mode == "pre" else "Stop", "permission_mode": "bypassPermissions"}
+    base.update(extra)
+    return base
+
+
+def file_change(proj):
+    return item({"type": "FileChange", "changes": {str(proj / "a.py"): {"type": "add", "content": "x"}}})
+
+
+def test_codex_pre_denies_write_before_stage_one_and_allows_after(tmp_path):
+    proj = project(tmp_path)
+    t = rollout(tmp_path, [meta(str(proj)), user("do the thing")])
+    hook = codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "echo hi > a.txt"}, tool_use_id="e1")
+    out = run_gate("pre", hook, host="codex")
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "`planner`" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert run_gate("pre", codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "git status --short"}), host="codex") is None
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner then do the thing")])
+    assert run_gate("pre", hook, host="codex") is None
+
+
+def test_codex_stop_blocks_after_an_edit_with_stages_missing(tmp_path):
+    proj = project(tmp_path)
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner go"), file_change(proj)])
+    out = run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=False, last_assistant_message="done"), host="codex")
+    assert out["decision"] == "block" and "review (`reviewer`)" in out["reason"] and "unlazy" not in out["reason"]
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner go"), user("$reviewer"), file_change(proj)])
+    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None
+    t = rollout(tmp_path, [meta(str(proj)), user("just a question"), command("git status --short")])
+    assert run_gate("stop", codex_hook(proj, t, "stop"), host="codex") is None, "read-only session is never trapped"
+
+
+def test_codex_transcript_is_auto_detected_without_host_flag(tmp_path):
+    proj = project(tmp_path)
+    t = rollout(tmp_path, [meta(str(proj)), user("do it")], name="rollout-2026-09-02T00-00-00-abc.jsonl")
+    hook = codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "echo hi > a.txt"})
+    assert run_gate("pre", hook)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner do it")], name="rollout-2026-09-02T00-00-01-abc.jsonl")
+    assert run_gate("pre", hook | {"transcript_path": str(t)}) is None

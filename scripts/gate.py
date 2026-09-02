@@ -212,13 +212,23 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def decide(mode, hook, env=None):
+def ledger_facts(tp, host=None):
+    """Facts from the host's own transcript format. Codex rollouts are selected by --host codex or
+    detected from the file itself; everything else is the Claude Code JSONL."""
+    if host == "codex" or (host is None and tp):
+        import gate_codex  # same directory; imported lazily because it imports this module
+        if host == "codex" or gate_codex.is_codex_transcript(tp):
+            return gate_codex.transcript_facts(tp)
+    return transcript_facts(tp)
+
+
+def decide(mode, hook, env=None, host=None):
     """The hook decision dict, or None to allow."""
     env = os.environ if env is None else env
     if env.get("LOADOUT_ENFORCE") == "0":
         return None
     tp = hook.get("transcript_path")
-    facts = transcript_facts(tp)
+    facts = ledger_facts(tp, host)
     tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
     target = _target_path(inp) if mode == "pre" else ""
     # the hook cwd follows `cd`; the edited path and the session's starting directory do not
@@ -253,7 +263,7 @@ def decide(mode, hook, env=None):
         if hook.get("agent_id"):  # a subagent is judged against its parent session too
             parent = _parent_transcript(tp)
             if parent:
-                invoked |= transcript_facts(parent).invoked
+                invoked |= ledger_facts(parent, host).invoked
         if skill in invoked:
             return None
         return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing. Details in LOADOUT.md. {HATCH}")
@@ -274,9 +284,11 @@ def decide(mode, hook, env=None):
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    argv = sys.argv[1:]
+    mode = argv[0] if argv else ""
+    host = argv[argv.index("--host") + 1] if "--host" in argv and argv.index("--host") + 1 < len(argv) else None
     try:
-        out = decide(mode, json.load(sys.stdin))
+        out = decide(mode, json.load(sys.stdin), host=host)
     except Exception:  # deliberate: a broken gate must allow, never wedge the harness; but say so
         sys.stderr.write("loadout gate: failed open (allowing) because of an internal error:\n")
         traceback.print_exc(file=sys.stderr)
