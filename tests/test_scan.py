@@ -112,6 +112,7 @@ def make_fixture(tmp_path):
     write(h / ".agents/skills/poolonly/SKILL.md", "---\ndescription: only in the shared pool\n---\n")
     write(h / ".dsh/skills/dshskill/SKILL.md", "---\ndescription: a deepseek harness skill\n---\n")
     write(h / ".dsh/skills/plainskill/SKILL.md", "---\ndescription: on deepseek too\n---\n")
+    write(h / ".zcode/skills/plainskill/SKILL.md", "---\ndescription: on zcode too\n---\n")
     write(h / ".someagent/skills/plainskill/SKILL.md", "---\ndescription: elsewhere\n---\n")
     write(h / ".pi/agent/skills/plainskill/SKILL.md", "---\ndescription: nested root\n---\n")
     return h, proj
