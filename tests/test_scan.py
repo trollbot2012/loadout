@@ -320,7 +320,7 @@ def test_self_install_check_and_host_opt_in(tmp_path):
     assert r.returncode == 1 and "claude-code: not installed" in r.stdout
     r = run_scan(h, ["--self-install"])
     assert r.returncode == 0, r.stderr
-    for host_dir in (".claude", ".codex", ".agents", ".gemini", ".grok"):
+    for host_dir in (".claude", ".codex", ".agents", ".gemini", ".grok", ".zcode"):
         dest = h / host_dir / "skills/loadout"
         assert (dest / "SKILL.md").is_file() and (dest / "scripts/scan.py").is_file(), host_dir
         assert (dest / "scripts/apply.py").is_file() and (dest / "LICENSE").is_file(), host_dir

@@ -36,7 +36,7 @@ Or copy the folder into your harness's skills dir manually:
 | Copilot CLI | `~/.copilot/skills/loadout/` or `~/.agents/skills/loadout/` |
 | Grok / Crush | their `skills/` dir or `~/.agents/skills/loadout/` |
 | DeepSeek Harness | `~/.dsh/skills/loadout/` (`$DSH_HOME` overrides) |
-| Qwen / Continue / Vibe / Hermes | their respective `skills/` dir |
+| Qwen / Continue / Vibe / Hermes / zcode | their respective `skills/` dir |
 
 `~/.agents/skills` is the shared pool read natively by Codex, Gemini, Cursor, OpenCode,
 Copilot, Grok and Crush. Claude Code does not read it.

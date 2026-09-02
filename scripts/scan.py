@@ -51,6 +51,7 @@ HOSTS = {
     # DeepSeek Harness: own skills dir; reads project AGENTS.md/CLAUDE.md + $DSH_HOME/AGENTS.md
     "deepseek":    (_root("DSH_HOME", "~/.dsh"), {"skills": "skills"}),
     "hermes":      (_root("HERMES_HOME", "~/.hermes"), {"skills": "skills"}),
+    "zcode":       ("~/.zcode", {"skills": "skills"}),
 }
 # ~/.agents/skills: the cross-agent shared pool. Not a harness of its own.
 SHARED = "agents-shared"

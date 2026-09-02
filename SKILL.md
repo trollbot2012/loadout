@@ -4,7 +4,7 @@ description: Audit the current coding agent/harness (installed skills, plugins, 
 license: MIT
 compatibility: Requires Python 3.9+ (stdlib only) on Windows, macOS or Linux, and a harness that can run a shell command and read markdown.
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
 ---
 
 # Loadout: Harness Audit → Workflow Recommendation
