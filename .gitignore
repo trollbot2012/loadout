@@ -3,3 +3,4 @@ findings.md
 progress.md
 GATES.md
 __pycache__/
+.pytest_cache/
