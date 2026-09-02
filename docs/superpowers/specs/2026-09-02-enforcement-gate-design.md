@@ -162,3 +162,41 @@ Amendments the code review surfaced; the code is the reference for these:
 - Additions beyond the original spec, kept: the scanner reports `enforcement gate registered
   (claude-code)` in the project section for re-audits; `.claude/settings.local.json` is gitignored
   because it embeds machine paths.
+
+## Hardening (adversarial review, 2026-09-02)
+
+- The Stop gate no longer yields to `stop_hook_active`. It blocks on every stop while binding
+  stages are missing. Its own cap: after 8 blocks in one session (counter file
+  `loadout-gate-<session_id>.blocks` in the system temp dir) it allows and prints a note to
+  stderr, so a runaway loop is bounded even without the host's own 8-block override.
+- The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md, .claude/settings.json,
+  .claude/settings.local.json, gate.py, apply.py) is operator-owned at all times, not only
+  before stage 1: Edit/Write/MultiEdit/NotebookEdit to any of those files is denied
+  unconditionally, and a Bash command that both names one of them and is write-shaped is
+  denied unconditionally. Only the exact apply.py bootstrap invocation passes, and it must be
+  this skill's own apply.py (resolved path equality), not a file that merely has that
+  basename. Re-audits that change the accepted set run under the operator hatch.
+- Project discovery does not trust the hook's cwd alone: LOADOUT.md is looked up from the
+  hook cwd, then from the edited file's own path, then from the cwd recorded on the first
+  transcript line (the directory the session started in). `cd` above the project no longer
+  blinds the gate.
+- Delegation is a mutation: an Agent/Task tool call in the parent transcript marks the session
+  as edited. A subagent's PreToolUse hook (hook input carries agent_id) unions its own
+  transcript with the parent session transcript (`<session>.jsonl` beside the `subagents/`
+  folder), so a parent that ran stage 1 may delegate edits, while a parent that did not cannot
+  launder them through a subagent.
+- A Skill call whose tool_result is flagged is_error does not count as an invocation.
+- Write-shaped now also covers: interpreter one-liners (`python -c`, `node -e`, `ruby -e`,
+  `perl -e`), PowerShell (`powershell`/`pwsh`, Set-Content, Out-File, Add-Content), `curl -o`/
+  `-O`, `wget`, `dd`, `sed --in-place` and `sed -i.bak` forms, `perl -pi`, git commands that
+  rewrite the tree (commit, stash, cherry-pick, merge, rebase, reset, clean, mv, rm, am, pull,
+  checkout, restore, apply), commands behind `sudo`, `env`, `VAR=x` prefixes, a `/path/`
+  prefix, a subshell `(` or a quoted `sh -c '…'` string, and the fullwidth `＞` character.
+- The hook matcher is `Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*`.
+  EnterWorktree and any MCP tool whose name contains write, create, edit, delete, remove,
+  exec, run, bash, workbench, upload, update, apply, move, rename, save or patch are treated
+  as edit tools; other MCP tools (reads, queries) are not gated.
+- Remaining ceilings, unchanged: an arbitrary script file (`python other.py`) is not
+  write-shaped; after stage 1 an agent could in principle append a forged user line to the
+  transcript file (needs a host-signed transcript to close); the transcript may lag the last
+  tool call by a moment.

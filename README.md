@@ -61,12 +61,15 @@ session transcript; there is no state file and no agent-side override. A denied 
 still counts as an edit for the Stop gate: an agent that tried to mutate must run the workflow.
 
 Operator hatch: `LOADOUT_ENFORCE=0` in the environment, or remove LOADOUT.md. Skip
-registration with `--no-enforce`. Writes to LOADOUT.md, AGENTS.md and CLAUDE.md are gated
-like any other edit once the gate is active; only an exact `apply.py` invocation is allowed
-as a re-bootstrap, so a re-audit on an enforced project needs the stage-1 skill first or the
-hatch. Ceilings: Claude Code overrides a Stop hook after 8 consecutive blocks without
-progress; the shell write check is a heuristic that can misfire on an innocent command and
-does not see writes made by an arbitrary script. Other hosts keep prose wiring in this version.
+registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md,
+`.claude/settings*.json`, gate.py, apply.py) is operator-owned: the agent cannot write to it
+at any stage, only the exact `apply.py` bootstrap invocation of this skill's own apply.py
+passes, and a re-audit that changes the accepted set runs under the hatch. Ceilings: the gate
+stops blocking after 8 consecutive Stop blocks in a session (its own counter; Claude Code has
+the same override); the shell write check is a heuristic that can misfire on an innocent
+command and does not see writes made by an arbitrary script file; a delegated subagent is
+gated against the parent session's transcript; the transcript may lag the last tool call.
+Other hosts keep prose wiring in this version.
 
 Self-install, check and update from a source checkout:
 

@@ -20,7 +20,7 @@ from pathlib import Path
 
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 GATE = Path(__file__).resolve().parent / "gate.py"
-GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)

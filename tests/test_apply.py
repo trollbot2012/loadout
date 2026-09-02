@@ -113,7 +113,7 @@ def test_claude_registers_gate_hooks_idempotently(tmp_path):
     assert res[".claude/settings.local.json"].startswith("created")
     data = json.loads((tmp_path / ".claude/settings.local.json").read_text(encoding="utf-8"))
     pre, stop = data["hooks"]["PreToolUse"], data["hooks"]["Stop"]
-    assert pre[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash"
+    assert pre[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
     assert pre[0]["hooks"][0]["command"].endswith('gate.py" pre')
     assert stop[0]["hooks"][0]["command"].endswith('gate.py" stop')
     assert sys.executable in pre[0]["hooks"][0]["command"]

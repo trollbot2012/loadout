@@ -2,37 +2,54 @@
 """loadout gate — make the accepted loadout binding via Claude Code hooks.
 
 Registered by apply.py into <project>/.claude/settings.local.json:
-  python gate.py pre    # PreToolUse for Edit|Write|MultiEdit|NotebookEdit|Bash
+  python gate.py pre    # PreToolUse for Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*
   python gate.py stop   # Stop
 Reads the hook JSON on stdin. Exit 0 with no output = allow. Never raises and never
-exits non-zero: enforcement must not break the harness, so any parse problem allows.
+exits non-zero: enforcement must not break the harness, so any parse problem allows
+(and says so on stderr).
 Ledger = the session transcript every hook receives as transcript_path; binding set =
 LOADOUT.md Accepted lines whose stage label does not start with "situational".
-Operator hatch: LOADOUT_ENFORCE=0 (or remove LOADOUT.md). There is no agent-side override.
+The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md, .claude/settings*.json, gate.py,
+apply.py) is operator-owned at every stage; only this skill's own apply.py, invoked in its
+exact bootstrap form, may touch it. Operator hatch: LOADOUT_ENFORCE=0 (or remove LOADOUT.md).
+There is no agent-side override.
 """
 import json
 import os
 import re
 import shlex
 import sys
+import tempfile
 import traceback
+from collections import namedtuple
 from pathlib import Path
 
-import apply  # same directory; owns the Accepted-line grammar
+import apply  # same directory; owns the Accepted-line grammar and the CLI flag set
 
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree"}
+DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
+MCP_MUTATING_RE = re.compile(
+    r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
+    re.I)
+SURFACE_FILES = {"LOADOUT.md", "AGENTS.md", "CLAUDE.md", "settings.json", "settings.local.json", "gate.py", "apply.py"}
 COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 HATCH = "Operator hatch: LOADOUT_ENFORCE=0."
+STOP_BLOCK_CAP = 8  # own runaway guard; Claude Code applies the same cap on its side
 
-# a redirect that is not a 2>&1-style fd dup and not to /dev/null or NUL
-_REDIRECT = re.compile(r"(?<![<>&])(?:>{1,2}|&>)(?!&)(?!\s*(?:/dev/null|NUL\b))")
-# a write-shaped word in command position (line start or after a shell operator)
-_WRITE_WORDS = re.compile(
-    r"(?:^|[|;&])\s*(?:tee|sed\s+-i|perl\s+-i|mv|cp|install|patch|git\s+apply|git\s+checkout\s+--|git\s+restore|touch)(?=\s|$)")
+# a redirect (>, >>, 1>, &>, fullwidth ＞) that is not a 2>&1-style fd dup and not to /dev/null or NUL
+_REDIRECT = re.compile(r"(?<![<>&])(?:[>＞]{1,2}|&>)(?!&)(?!\s*(?:/dev/null|NUL\b))")
+# a write-shaped word in command position: line start, after a shell operator, a subshell or a quote
+# (sh -c '...'), allowing sudo/env/VAR=x/path prefixes
+_PREFIX = r"(?:(?:sudo|env)\s+|\w+=\S*\s+)*(?:\S*[\\/])?"
+_WORDS = (r"tee|sed\s+(?:-\w*i\S*|--in-place\S*)|perl\s+-\S*[ip]\S*|mv|cp|install|patch|dd|wget|touch"
+          r"|curl\s+(?:\S+\s+)*-[oO]\b"
+          r"|git\s+(?:apply|checkout|restore|commit|stash|cherry-pick|merge|rebase|reset|clean|mv|rm|am|pull)"
+          r"|(?:python\S*|node|ruby|perl)\s+-[ce]\b|powershell|pwsh|Set-Content|Out-File|Add-Content")
+_WRITE_WORDS = re.compile(r"(?:^|[|;&(\x27\"])\s*" + _PREFIX + r"(?:" + _WORDS + r")(?=\s|$|[\x27\"])", re.I)
+# the enforcement surface: naming it in a command is gated before stage 1, and writing it is denied always
+_SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md", re.I)
 
-
-# the enforcement surface: gated before stage 1 unless the command is the exact bootstrap (pre mode only)
-_SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md", re.I)
+Facts = namedtuple("Facts", "invoked edited cwd")  # cwd = where the session started (first transcript line)
 
 
 def write_shaped(cmd):
@@ -41,23 +58,31 @@ def write_shaped(cmd):
 
 
 def sensitive(cmd):
-    """True when a shell command names the enforcement surface. Pre-mode only: reading it is not an edit."""
+    """True when a shell command names the enforcement surface."""
     return bool(_SENSITIVE.search(cmd))
 
 
+def is_edit_tool(tool):
+    return tool in EDIT_TOOLS or bool(MCP_MUTATING_RE.match(tool or ""))
+
+
 def transcript_facts(path):
-    """(invoked skill names, edited?) from a JSONL transcript. Bad lines are skipped."""
-    invoked, edited = set(), False
+    """Facts(invoked skills, edited?, first cwd) from a JSONL transcript. Bad lines are skipped."""
+    skills, errors, invoked, edited, first_cwd = [], set(), set(), False, None
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except (OSError, TypeError):
-        return invoked, edited
+        return Facts(invoked, edited, first_cwd)
     for line in lines:
         try:
             d = json.loads(line)
         except ValueError:
             continue
-        msg = d.get("message") if isinstance(d, dict) else None
+        if not isinstance(d, dict):
+            continue
+        if first_cwd is None and d.get("cwd"):
+            first_cwd = str(d["cwd"])
+        msg = d.get("message")
         content = msg.get("content") if isinstance(msg, dict) else None
         # slash invocations count only from the user: an agent must not be able to write its own pass
         is_user = d.get("type") == "user" or (isinstance(msg, dict) and msg.get("role") == "user")
@@ -68,30 +93,38 @@ def transcript_facts(path):
         for block in content or []:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "text":
+            kind = block.get("type")
+            if kind == "text":
                 if is_user:
                     invoked.update(COMMAND_RE.findall(block.get("text") or ""))
-            elif block.get("type") == "tool_use":
+            elif kind == "tool_result":
+                if block.get("is_error"):
+                    errors.add(block.get("tool_use_id"))
+            elif kind == "tool_use":
                 name, inp = block.get("name"), block.get("input") or {}
                 if name == "Skill" and inp.get("skill"):
-                    invoked.add(str(inp["skill"]))
-                elif name in EDIT_TOOLS:
+                    skills.append((block.get("id"), str(inp["skill"])))
+                elif is_edit_tool(name) or name in DELEGATION_TOOLS:
                     edited = True
                 elif name == "Bash" and write_shaped(str(inp.get("command") or "")):
                     edited = True
-    return invoked, edited
+    invoked.update(n for i, n in skills if i not in errors)  # a failed Skill call is not an invocation
+    return Facts(invoked, edited, first_cwd)
 
 
-def find_loadout(cwd):
-    """Nearest LOADOUT.md walking up from cwd, or None."""
-    try:
-        p = Path(cwd or os.getcwd()).resolve()
-    except (OSError, TypeError):
-        return None
-    for d in (p, *p.parents):
-        f = d / "LOADOUT.md"
-        if f.is_file():
-            return f
+def find_loadout(*starts):
+    """Nearest LOADOUT.md walking up from the first start that has one, or None."""
+    for start in starts:
+        if not start:
+            continue
+        try:
+            p = Path(start).resolve()
+        except (OSError, TypeError):
+            continue
+        for d in (p, *p.parents):
+            f = d / "LOADOUT.md"
+            if f.is_file():
+                return f
     return None
 
 
@@ -108,10 +141,9 @@ def _basename(tok):
     return re.split(r"[\\/]", tok)[-1]
 
 
-def bootstrap_invocation(cmd):
-    """True only for an exact, validated `apply.py` run: the one-time bootstrap that may
-    re-run on an enforced project. No shell operators, no extra tokens. Everything else that
-    touches LOADOUT.md / AGENTS.md / CLAUDE.md stays gated like any other mutation."""
+def bootstrap_invocation(cmd, cwd=None):
+    """True only for an exact, validated run of THIS skill's apply.py: the one-time bootstrap that
+    may re-run on an enforced project. No shell operators, no extra tokens, no look-alike file."""
     if re.search(r"[|;&<>`\n]|\$\(", cmd):
         return False
     try:
@@ -124,6 +156,14 @@ def bootstrap_invocation(cmd):
     if _basename(exe).lower() not in _INTERPRETERS and exe != sys.executable:
         return False
     if _basename(script) != "apply.py":
+        return False
+    p = Path(script)
+    if not p.is_absolute():
+        p = Path(cwd or os.getcwd()) / p
+    try:
+        if os.path.normcase(str(p.resolve())) != os.path.normcase(str(Path(apply.__file__).resolve())):
+            return False
+    except OSError:
         return False
     positional, i = 0, 0
     while i < len(rest):
@@ -142,12 +182,42 @@ def bootstrap_invocation(cmd):
     return positional == 1
 
 
+def _target_path(inp):
+    return str(inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or "")
+
+
+def _parent_transcript(tp):
+    """<session>.jsonl for a subagent transcript at <session>/subagents/agent-*.jsonl, if it exists."""
+    try:
+        p = Path(tp).parent.parent.with_suffix(".jsonl")
+        return p if p.is_file() else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _deny(reason):
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def _stop_blocks(session_id):
+    """Own runaway guard: count of Stop blocks this session; None when there is no session id."""
+    if not session_id:
+        return None
+    return Path(tempfile.gettempdir()) / f"loadout-gate-{session_id}.blocks"
+
+
 def decide(mode, hook, env=None):
     """The hook decision dict, or None to allow."""
     env = os.environ if env is None else env
     if env.get("LOADOUT_ENFORCE") == "0":
         return None
-    loadout = find_loadout(hook.get("cwd"))
+    tp = hook.get("transcript_path")
+    facts = transcript_facts(tp)
+    tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
+    target = _target_path(inp) if mode == "pre" else ""
+    # the hook cwd follows `cd`; the edited path and the session's starting directory do not
+    loadout = find_loadout(hook.get("cwd"), Path(target).parent if target else None, facts.cwd)
     if not loadout:
         return None
     try:
@@ -157,30 +227,50 @@ def decide(mode, hook, env=None):
     if not stages:
         return None
     if mode == "pre":
-        tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
         if tool == "Bash":
             cmd = str(inp.get("command") or "")
-            if bootstrap_invocation(cmd) or not (write_shaped(cmd) or sensitive(cmd)):
+            if bootstrap_invocation(cmd, hook.get("cwd")):
                 return None
-        elif tool not in EDIT_TOOLS:
+            if sensitive(cmd) and write_shaped(cmd):
+                return _deny("Loadout gate: the enforcement config (LOADOUT.md, AGENTS.md, CLAUDE.md, "
+                             f".claude/settings*.json, gate.py, apply.py) is operator-owned; only the exact "
+                             f"apply.py bootstrap may write it. {HATCH}")
+            if not (write_shaped(cmd) or sensitive(cmd)):
+                return None
+        elif is_edit_tool(tool):
+            if _basename(target) in SURFACE_FILES:
+                return _deny(f"Loadout gate: `{_basename(target)}` is operator-owned enforcement config; "
+                             f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")
+        else:
             return None
         stage, skill = stages[0]
-        invoked, _ = transcript_facts(hook.get("transcript_path"))
+        invoked = set(facts.invoked)
+        if hook.get("agent_id"):  # a subagent is judged against its parent session too
+            parent = _parent_transcript(tp)
+            if parent:
+                invoked |= transcript_facts(parent).invoked
         if skill in invoked:
             return None
-        return {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny",
-            "permissionDecisionReason":
-                f"Loadout gate: invoke `{skill}` ({stage}) before editing. Details in LOADOUT.md. {HATCH}"}}
+        return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing. Details in LOADOUT.md. {HATCH}")
     if mode == "stop":
-        if hook.get("stop_hook_active"):
+        if not facts.edited:
             return None
-        invoked, edited = transcript_facts(hook.get("transcript_path"))
-        if not edited:
-            return None
-        missing = [(s, k) for s, k in stages if k not in invoked]
+        missing = [(s, k) for s, k in stages if k not in facts.invoked]
         if not missing:
             return None
+        counter = _stop_blocks(hook.get("session_id"))
+        if counter is not None:
+            try:
+                n = int(counter.read_text()) if counter.is_file() else 0
+            except (OSError, ValueError):
+                n = 0
+            if n >= STOP_BLOCK_CAP:
+                sys.stderr.write(f"loadout gate: {n} consecutive Stop blocks this session; allowing (cap).\n")
+                return None
+            try:
+                counter.write_text(str(n + 1))
+            except OSError:
+                pass
         return {"decision": "block",
                 "reason": "Loadout gate: stages not run this session: "
                           + ", ".join(f"{s} (`{k}`)" for s, k in missing)

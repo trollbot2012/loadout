@@ -57,21 +57,21 @@ def test_transcript_facts_collects_skills_and_edits(tmp_path):
         [skill("superpowers:brainstorming"), {"type": "text", "text": "ok"}],
         [tool("Bash", command="git status")],
     ])
-    invoked, edited = gate.transcript_facts(t)
-    assert invoked == {"loadout", "superpowers:brainstorming"}
-    assert edited is False
+    facts = gate.transcript_facts(t)
+    assert facts.invoked == {"loadout", "superpowers:brainstorming"}
+    assert facts.edited is False
     t = transcript(tmp_path, [[tool("Edit", file_path="a.py", old_string="x", new_string="y")]])
-    assert gate.transcript_facts(t) == (set(), True)
+    assert gate.transcript_facts(t)[:2] == (set(), True)
     t = transcript(tmp_path, [[tool("Bash", command="cat > a.py <<'EOF'")]])
-    assert gate.transcript_facts(t) == (set(), True)
+    assert gate.transcript_facts(t)[:2] == (set(), True)
 
 
 def test_transcript_facts_tolerates_garbage(tmp_path):
     p = tmp_path / "bad.jsonl"
     p.write_bytes(('not json\n{"message": 5}\n' + json.dumps({"message": {"content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "x"}}]}}) + "\n").encode("utf-8"))
-    assert gate.transcript_facts(p) == ({"x"}, False)
-    assert gate.transcript_facts(tmp_path / "missing.jsonl") == (set(), False)
-    assert gate.transcript_facts(None) == (set(), False)
+    assert gate.transcript_facts(p)[:2] == ({"x"}, False)
+    assert gate.transcript_facts(tmp_path / "missing.jsonl")[:2] == (set(), False)
+    assert gate.transcript_facts(None)[:2] == (set(), False)
 
 
 # ---------------------------------------------------------------- decisions
@@ -148,23 +148,25 @@ def test_bootstrap_boundary_is_exact_not_blanket(tmp_path):
     assert denied(pre_hook(proj, t, "Edit", file_path=str(proj.parent / "AGENTS.md"), old_string="a", new_string="b"))
     assert denied(pre_hook(proj, t, "Bash", command="cat > LOADOUT.md <<'EOF'"))
     assert denied(pre_hook(proj, t, "Bash", command="echo x >> CLAUDE.md"))
-    # only the exact validated apply.py invocation is the bootstrap exception
-    ok = ['python "x/apply.py" . --host claude-code', "python3 scripts/apply.py /p --loadout L.md --no-enforce",
-          f'"{sys.executable}" "C:\\a b\\apply.py" "C:\\proj"']
+    # only the exact validated apply.py invocation (this skill's own file) is the bootstrap exception
+    A = str(REPO / "scripts" / "apply.py")
+    ok = [f'python "{A}" . --host claude-code', f'python3 "{A}" /p --loadout L.md --no-enforce',
+          f'"{sys.executable}" "{A}" "C:\\proj"']
     for cmd in ok:
         assert run_gate("pre", pre_hook(proj, t, "Bash", command=cmd)) is None, cmd
-    bad = ["python x/apply.py . --host claude-code && cat > LOADOUT.md", "python x/apply.py . ; rm -rf x",
-           "python x/apply.py . > out", "python x/apply.py . --host claude-code --evil", "python x/apply.py . extra",
-           "python x/notapply.py .", "bash apply.py .", "python x/apply.py"]
+    bad = [f'python "{A}" . --host claude-code && cat > LOADOUT.md', f'python "{A}" . ; rm -rf x',
+           f'python "{A}" . > out', f'python "{A}" . --host claude-code --evil', f'python "{A}" . extra',
+           "python x/notapply.py .", f'bash "{A}" .', f'python "{A}"', "python x/apply.py . --host claude-code"]
     for cmd in bad:
         assert denied(pre_hook(proj, t, "Bash", command=cmd)), cmd
 
 
 def test_bootstrap_invocation_predicate():
-    assert gate.bootstrap_invocation('python "x/apply.py" . --host claude-code')
-    assert not gate.bootstrap_invocation("python x/apply.py . | tee log")
-    assert not gate.bootstrap_invocation("python x/apply.py . $(id)")
-    assert not gate.bootstrap_invocation("python x/apply.py . `id`")
+    A = str(REPO / "scripts" / "apply.py")
+    assert gate.bootstrap_invocation(f'python "{A}" . --host claude-code')
+    assert not gate.bootstrap_invocation(f'python "{A}" . | tee log')
+    assert not gate.bootstrap_invocation(f'python "{A}" . $(id)')
+    assert not gate.bootstrap_invocation(f'python "{A}" . `id`')
 
 
 def test_slash_command_counts_as_invoked(tmp_path):
@@ -214,12 +216,6 @@ def test_stop_blocks_only_after_edits_and_names_missing_stages(tmp_path):
     assert "unlazy" not in out["reason"], "situational stages are not binding"
     t = transcript(tmp_path, [[skill("planner")], [skill("reviewer")], [tool("Edit", file_path="a.py")]])
     assert run_gate("stop", stop_hook(proj, t)) is None
-
-
-def test_stop_respects_loop_guard(tmp_path):
-    proj = project(tmp_path)
-    t = transcript(tmp_path, [[tool("Edit", file_path="a.py")]])
-    assert run_gate("stop", stop_hook(proj, t, active=True)) is None
 
 
 def test_silent_allow_without_loadout_or_with_hatch(tmp_path):
