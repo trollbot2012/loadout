@@ -6,6 +6,7 @@ Codex appends ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread>.jsonl; every li
 a missing file is an empty Facts, nothing raises.
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -14,6 +15,33 @@ import gate  # same directory; owns Facts, write_shaped, COMMAND_RE and STOP_REA
 # Codex skill mention syntax in a user prompt: `$loadout`
 SKILL_MENTION_RE = re.compile(r"(?<![\w$])\$([A-Za-z0-9][\w-]*)")
 _CODEX_NAME = re.compile(r"^rollout-")
+
+
+SKILL_READ_RE = re.compile(r"[\\/]skills[\\/]([^\\/]+)[\\/]SKILL\.md$", re.I)
+
+
+def _skill_reads(parsed_cmd):
+    """Skill names whose SKILL.md a parsed shell command reads."""
+    names = set()
+    for pc in parsed_cmd or []:
+        if isinstance(pc, dict) and pc.get("type") == "read":
+            m = SKILL_READ_RE.search(str(pc.get("path") or ""))
+            if m:
+                names.add(m.group(1))
+    return names
+
+
+def find_rollout(session_id, home=None):
+    """The rollout JSONL for a Codex session id under <CODEX_HOME or ~/.codex>/sessions, or None.
+    Codex's Stop hook payload carries session_id but no transcript_path."""
+    if not session_id:
+        return None
+    root = Path(home or os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "sessions"
+    try:
+        hits = sorted(root.glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
+    except OSError:
+        return None
+    return str(hits[-1]) if hits else None
 
 
 def _user_skills(text):
@@ -59,6 +87,12 @@ def transcript_facts(path):
                 # the list is shell + "-Command" + the real command; a write word is only recognised
                 # in command position, so test the wrapped command on its own as well as the whole
                 edited = edited or any(gate.write_shaped(c) for c in [" ".join(parts)] + parts)
+                # Codex has no skill event (recorded live 2026-09-02): loading a skill shows up as the
+                # agent reading <skills root>/<name>/SKILL.md, which is the strongest invocation signal
+                read = _skill_reads(it.get("parsed_cmd"))
+                if read:
+                    invoked |= read
+                    events.append("skill")
             elif t == "UserMessage":  # only the user can invoke a skill or carry a Stop block
                 text = _text(it.get("content"))
                 skills = _user_skills(text)

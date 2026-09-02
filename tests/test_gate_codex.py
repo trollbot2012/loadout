@@ -172,3 +172,44 @@ def test_codex_transcript_is_auto_detected_without_host_flag(tmp_path):
     assert run_gate("pre", hook)["hookSpecificOutput"]["permissionDecision"] == "deny"
     t = rollout(tmp_path, [meta(str(proj)), user("$planner do it")], name="rollout-2026-09-02T00-00-01-abc.jsonl")
     assert run_gate("pre", hook | {"transcript_path": str(t)}) is None
+
+
+def test_codex_apply_patch_is_an_edit_and_the_surface_stays_operator_owned(tmp_path):
+    proj = project(tmp_path)
+    patch = "*** Begin Patch\n*** Add File: a.py\n+x\n*** End Patch"
+    t = rollout(tmp_path, [meta(str(proj)), user("do it")])
+    hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": patch}, tool_use_id="e1")
+    assert run_gate("pre", hook, host="codex")["hookSpecificOutput"]["permissionDecision"] == "deny"
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner do it")])
+    assert run_gate("pre", hook | {"transcript_path": str(t)}, host="codex") is None
+    surface = "*** Begin Patch\n*** Update File: LOADOUT.md\n@@\n-- review: `reviewer`\n*** End Patch"
+    out = run_gate("pre", hook | {"transcript_path": str(t), "tool_input": {"command": surface}}, host="codex")
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny" and "operator-owned" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_codex_stop_without_transcript_path_finds_the_rollout_by_session_id(tmp_path, monkeypatch):
+    proj = project(tmp_path)
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "09" / "02"
+    sessions.mkdir(parents=True)
+    sid = "01a0643e-4855-7422-a7b7-3f301d7bf153"
+    rollout(sessions, [meta(str(proj)), user("$planner go"), file_change(proj)], name=f"rollout-2026-09-02T17-30-00-{sid}.jsonl")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    hook = {"session_id": sid, "turn_id": "t1", "cwd": str(proj), "hook_event_name": "Stop",
+            "permission_mode": "bypassPermissions", "stop_hook_active": False, "last_assistant_message": "done"}
+    out = run_gate("stop", hook, host="codex")
+    assert out and out["decision"] == "block" and "review (`reviewer`)" in out["reason"]
+    assert gate_codex.find_rollout("no-such-session", home) is None
+
+
+def test_reading_a_skill_file_counts_as_invoking_it(tmp_path):
+    # recorded live: Codex has no skill event; the agent reads <skills root>/<name>/SKILL.md via a shell read
+    read = item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", "Get-Content -Raw 'C:/u/.agents/skills/loadout/SKILL.md'"],
+                 "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": "C:/u/.agents/skills/loadout/SKILL.md"}],
+                 "status": "failed"})
+    t = rollout(tmp_path, [meta(), user("go"), read])
+    facts = gate_codex.transcript_facts(t)
+    assert facts.invoked == {"loadout"} and facts.edited is False
+    other = item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", "cat README.md"], "cwd": "file:///C:/proj",
+                  "parsed_cmd": [{"type": "read", "cmd": "cat README.md", "name": "README.md", "path": "C:/proj/README.md"}]})
+    assert gate_codex.transcript_facts(rollout(tmp_path, [meta(), other])).invoked == set()

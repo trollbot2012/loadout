@@ -25,7 +25,8 @@ from pathlib import Path
 
 import apply  # same directory; owns the Accepted-line grammar and the CLI flag set
 
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree", "apply_patch"}  # apply_patch: Codex
+PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$", re.M)
 DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
 MCP_MUTATING_RE = re.compile(
     r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
@@ -194,8 +195,19 @@ def bootstrap_invocation(cmd, cwd=None):
     return positional == 1
 
 
+def _target_paths(inp):
+    """Every file a tool call touches: one for the edit tools, each patched file for Codex's apply_patch
+    (whose tool_input.command is the patch text)."""
+    cmd = str(inp.get("command") or "")
+    if cmd.startswith("*** Begin Patch"):
+        return PATCH_FILE_RE.findall(cmd)
+    p = str(inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or "")
+    return [p] if p else []
+
+
 def _target_path(inp):
-    return str(inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or "")
+    paths = _target_paths(inp)
+    return paths[0] if paths else ""
 
 
 def _parent_transcript(tp):
@@ -212,11 +224,14 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def ledger_facts(tp, host=None):
+def ledger_facts(tp, host=None, session_id=None):
     """Facts from the host's own transcript format. Codex rollouts are selected by --host codex or
-    detected from the file itself; everything else is the Claude Code JSONL."""
+    detected from the file itself; everything else is the Claude Code JSONL. Codex's Stop payload
+    carries no transcript_path, only session_id, so the rollout is located by that id."""
     if host == "codex" or (host is None and tp):
         import gate_codex  # same directory; imported lazily because it imports this module
+        if host == "codex" and not tp:
+            tp = gate_codex.find_rollout(session_id)
         if host == "codex" or gate_codex.is_codex_transcript(tp):
             return gate_codex.transcript_facts(tp)
     return transcript_facts(tp)
@@ -228,7 +243,7 @@ def decide(mode, hook, env=None, host=None):
     if env.get("LOADOUT_ENFORCE") == "0":
         return None
     tp = hook.get("transcript_path")
-    facts = ledger_facts(tp, host)
+    facts = ledger_facts(tp, host, hook.get("session_id"))
     tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
     target = _target_path(inp) if mode == "pre" else ""
     # the hook cwd follows `cd`; the edited path and the session's starting directory do not
@@ -253,8 +268,9 @@ def decide(mode, hook, env=None, host=None):
             if not (write_shaped(cmd) or sensitive(cmd)):
                 return None
         elif is_edit_tool(tool):
-            if _basename(target).lower() in SURFACE_FILES:  # case-insensitive filesystems
-                return _deny(f"Loadout gate: `{_basename(target)}` is operator-owned enforcement config; "
+            hit = next((p for p in _target_paths(inp) if _basename(p).lower() in SURFACE_FILES), None)
+            if hit:  # case-insensitive filesystems; every file of a multi-file patch is checked
+                return _deny(f"Loadout gate: `{_basename(hit)}` is operator-owned enforcement config; "
                              f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")
         else:
             return None
