@@ -15,6 +15,7 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
     project-level Codex hooks need a trusted project, and the gate is a no-op without LOADOUT.md.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
+import hashlib
 import json
 import os
 import re
@@ -26,8 +27,6 @@ GATE = Path(__file__).resolve().parent / "gate.py"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
 CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
-CODEX_NOTE = (" (Codex loads hooks at the next session; untrusted hooks are skipped until trusted in /hooks"
-              " or run with --dangerously-bypass-hook-trust)")
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
@@ -103,6 +102,79 @@ def register_codex_gate(path=None, data=None):
     existed = path.is_file()
     data = load_settings(path) if data is None else data
     return write_hooks(path, data, existed, upsert_hooks(data, codex_gate_hooks()))
+
+
+# Codex skips hooks it has not been told to trust, silently. Trust is a per-handler hash in
+# config.toml ([hooks.state.'<file>:<event>:<group>:<handler>'] trusted_hash = "sha256:..."),
+# reproduced here from codex-rs/hooks/src/engine/discovery.rs hook_hash and verified against
+# every entry on a real machine, so apply can grant it without the operator opening /hooks.
+CODEX_CONFIG = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "config.toml"
+_CODEX_EVENT_LABEL = {"PreToolUse": "pre_tool_use", "PermissionRequest": "permission_request",
+                      "PostToolUse": "post_tool_use", "PreCompact": "pre_compact", "PostCompact": "post_compact",
+                      "SessionStart": "session_start", "SessionEnd": "session_end",
+                      "UserPromptSubmit": "user_prompt_submit", "SubagentStart": "subagent_start",
+                      "SubagentStop": "subagent_stop", "Stop": "stop", "Interrupt": "interrupt"}
+_CODEX_NO_MATCHER = {"user_prompt_submit", "stop", "interrupt"}
+_CODEX_CTX_LIMIT_EVENTS = {"pre_tool_use", "post_tool_use", "session_start", "user_prompt_submit", "subagent_start"}
+
+
+def codex_hook_hash(event, group, handler, windows=None):
+    """Codex's trusted_hash for one command handler: canonical JSON of the normalised identity, sha256."""
+    windows = sys.platform == "win32" if windows is None else windows
+    cmd = (handler.get("commandWindows") or handler.get("command_windows")) if windows else None
+    cmd = cmd or handler.get("command", "")
+    t = handler.get("timeout")
+    if event in ("session_end", "interrupt"):
+        t = min(max(1 if t is None else t, 1), 3)
+    else:
+        t = max(600 if t is None else t, 1)
+    hook = {"type": "command", "command": cmd, "timeout": t, "async": bool(handler.get("async", False))}
+    if handler.get("statusMessage") is not None:
+        hook["statusMessage"] = handler["statusMessage"]
+    acl = handler.get("additionalContextLimit")
+    if event in _CODEX_CTX_LIMIT_EVENTS and acl is not None and acl != 2500:
+        hook["additionalContextLimit"] = acl
+    ident = {"event_name": event, "hooks": [hook]}
+    if group.get("matcher") is not None and event not in _CODEX_NO_MATCHER:
+        ident["matcher"] = group["matcher"]
+    blob = json.dumps(ident, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(blob).hexdigest()
+
+
+def trust_codex_gate(hooks_path=None, config_path=None):
+    """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
+    The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
+    sections are replaced or appended; every other line stays as it is."""
+    hooks_path = Path(hooks_path or CODEX_HOOKS)
+    config_path = Path(config_path or CODEX_CONFIG)
+    data = load_settings(hooks_path)
+    wanted = {}
+    for json_key, label in _CODEX_EVENT_LABEL.items():
+        for gi, group in enumerate(data.get(json_key, [])):
+            for hi, handler in enumerate(group.get("hooks", [])):
+                if "gate.py" in handler.get("command", ""):
+                    wanted[f"{hooks_path}:{label}:{gi}:{hi}"] = codex_hook_hash(label, group, handler)
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else "[hooks.state]\n"
+    nl = "\r\n" if "\r\n" in text else "\n"
+    changed = False
+    for key, digest in wanted.items():
+        header = f"[hooks.state.'{key}']"
+        section = re.compile(re.escape(header) + r"\r?\n(?:[ \t]*trusted_hash[ \t]*=[ \t]*\"[^\"]*\"[ \t]*)?", re.M)
+        replacement = f"{header}{nl}trusted_hash = \"{digest}\""
+        m = section.search(text)
+        if m:
+            if m.group(0).rstrip("\r\n") != replacement:
+                text = text[:m.start()] + replacement + text[m.end():]
+                changed = True
+        else:
+            text = text.rstrip("\r\n") + nl + nl + replacement + nl
+            changed = True
+    if not changed and config_path.is_file():
+        return "unchanged"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    return "trusted"
 
 
 def parse_accepted(text):
@@ -191,7 +263,10 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
     if gate:
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     if codex:
-        results["~/.codex/hooks.json"] = register_codex_gate(CODEX_HOOKS, codex_settings) + CODEX_NOTE
+        reg = register_codex_gate(CODEX_HOOKS, codex_settings)
+        trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
+        results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
+                                          + " in config.toml (Codex loads hooks at the next session)")
     return results
 
 
