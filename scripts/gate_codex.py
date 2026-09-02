@@ -93,13 +93,16 @@ def transcript_facts(path):
                 if read:
                     invoked |= read
                     events.append("skill")
-            elif t == "UserMessage":  # only the user can invoke a skill or carry a Stop block
-                text = _text(it.get("content"))
-                skills = _user_skills(text)
+            elif t == "UserMessage":  # only the user can invoke a skill
+                skills = _user_skills(_text(it.get("content")))
                 invoked |= skills
                 if skills:
                     events.append("skill")
-                elif gate.STOP_REASON in text:
+            elif t == "HookPrompt":
+                # recorded live: an injected Stop-block reason lands here (fragments[].text). Codex has no
+                # block cap of its own, so this count is the only runaway guard on this host
+                text = "\n".join(str(f.get("text") or "") for f in it.get("fragments") or [] if isinstance(f, dict))
+                if gate.STOP_REASON in text:
                     events.append("block")
         elif kind == "response_item" and pl.get("type") == "custom_tool_call" and pl.get("name") == "exec":
             # fallback when item_completed events are absent: the JS snippet names the tool

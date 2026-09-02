@@ -78,7 +78,8 @@ def test_agent_text_does_not_count_as_invocation(tmp_path):
 
 
 def test_blocks_count_consecutively_and_reset_on_skill(tmp_path):
-    block = user("Stop hook feedback: " + gate.STOP_REASON + ": stage (`loadout`)")
+    # recorded live: the injected block reason is a HookPrompt item, not a user message
+    block = item({"type": "HookPrompt", "id": "m1", "fragments": [{"text": gate.STOP_REASON + ": stage (`loadout`)", "hookRunId": "stop:9:x"}]})
     p = rollout(tmp_path, [meta(), block, block])
     assert gate_codex.transcript_facts(p).blocks == 2
     p = rollout(tmp_path, [meta(), block, user("$loadout"), block])
@@ -213,3 +214,21 @@ def test_reading_a_skill_file_counts_as_invoking_it(tmp_path):
     other = item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", "cat README.md"], "cwd": "file:///C:/proj",
                   "parsed_cmd": [{"type": "read", "cmd": "cat README.md", "name": "README.md", "path": "C:/proj/README.md"}]})
     assert gate_codex.transcript_facts(rollout(tmp_path, [meta(), other])).invoked == set()
+
+
+def hook_prompt(text):
+    # recorded live 2026-09-02: Codex records an injected Stop-block reason as a HookPrompt item
+    return item({"type": "HookPrompt", "id": "m1", "fragments": [{"text": text, "hookRunId": "stop:9:x"}]})
+
+
+def test_stop_block_cap_counts_hook_prompt_items(tmp_path):
+    proj = project(tmp_path)
+    block = hook_prompt("Loadout gate: stages not run this session: review (`reviewer`). Invoke them, then stop.")
+    base = [meta(str(proj)), user("$planner go"), file_change(proj)]
+    t = rollout(tmp_path, base + [block] * (gate.STOP_BLOCK_CAP - 1))
+    assert gate_codex.transcript_facts(t).blocks == gate.STOP_BLOCK_CAP - 1
+    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex")["decision"] == "block"
+    t = rollout(tmp_path, base + [block] * gate.STOP_BLOCK_CAP)
+    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None, "cap: allow"
+    t = rollout(tmp_path, base + [block] * gate.STOP_BLOCK_CAP + [user("$reviewer")])
+    assert gate_codex.transcript_facts(t).blocks == 0, "a skill invocation resets the run"
