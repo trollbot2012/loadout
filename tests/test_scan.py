@@ -372,6 +372,18 @@ def test_brief_keeps_only_the_first_sentence_of_a_description(tmp_path):
     assert "Use when the user asks" not in brief
 
 
+def test_registered_gate_is_reported_for_reaudit(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    write(proj / "LOADOUT.md", "# Loadout: x\nDate: 2026-09-02\n\n## Accepted\n- planning: `p`\n")
+    write(proj / ".claude/settings.local.json", json.dumps({"hooks": {"Stop": [
+        {"hooks": [{"type": "command", "command": 'python "/x/gate.py" stop'}]}]}}))
+    inv = scan_json(h, proj)
+    assert inv["project"]["loadout"]["gate"] == "claude-code"
+    out = run_scan(h, [str(proj)]).stdout
+    assert "enforcement gate registered (claude-code)" in out
+    assert "scripts/gate.py" in scan.SKILL_FILES
+
+
 def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):
     h, proj = make_fixture(tmp_path)
     out = run_scan(h, [str(proj)], host="codex").stdout  # claude-code is now a foreign host
