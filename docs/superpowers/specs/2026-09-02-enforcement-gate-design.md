@@ -156,6 +156,9 @@ Amendments the code review surfaced; the code is the reference for these:
 - Redirects `1>` and `&>` count as write-shaped; `2>&1` and `>/dev/null` do not.
 - A gate that hits an internal error still allows (exit 0, no stdout) but prints the traceback to
   stderr, so a broken gate is visible in hook debug output rather than a silent no-op.
+- A denied Edit/Write attempt is still a tool_use in the transcript, so it counts as an edit for the
+  Stop gate. Kept deliberately: intent to mutate is enough to require the workflow. Only a session
+  that never attempted an edit is exempt.
 - Additions beyond the original spec, kept: the scanner reports `enforcement gate registered
   (claude-code)` in the project section for re-audits; `.claude/settings.local.json` is gitignored
   because it embeds machine paths.
