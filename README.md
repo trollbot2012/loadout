@@ -65,8 +65,9 @@ registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md
 `.claude/settings*.json`, gate.py, apply.py) is operator-owned: the agent cannot write to it
 at any stage, only the exact `apply.py` bootstrap invocation of this skill's own apply.py
 passes, and a re-audit that changes the accepted set runs under the hatch. Ceilings: the gate
-stops blocking after 8 consecutive Stop blocks in a session (its own counter; Claude Code has
-the same override); the shell write check is a heuristic that can misfire on an innocent
+stops blocking after 8 consecutive Stop blocks with no skill invoked in between, counted from
+the session transcript itself (nothing on disk, so a fresh session inherits nothing; Claude Code
+has the same override); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
 Other hosts keep prose wiring in this version.

@@ -166,9 +166,10 @@ Amendments the code review surfaced; the code is the reference for these:
 ## Hardening (adversarial review, 2026-09-02)
 
 - The Stop gate no longer yields to `stop_hook_active`. It blocks on every stop while binding
-  stages are missing. Its own cap: after 8 blocks in one session (counter file
-  `loadout-gate-<session_id>.blocks` in the system temp dir) it allows and prints a note to
-  stderr, so a runaway loop is bounded even without the host's own 8-block override.
+  stages are missing. Its own cap: after 8 consecutive block messages in the transcript with no
+  successful skill invocation between them, it allows and prints a note to stderr. The count is
+  read from the transcript on every stop, so nothing persists on disk, a resumed or fresh session
+  cannot inherit a disarmed gate, and any real progress resets the run.
 - The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md, .claude/settings.json,
   .claude/settings.local.json, gate.py, apply.py) is operator-owned at all times, not only
   before stage 1: Edit/Write/MultiEdit/NotebookEdit to any of those files is denied
@@ -200,3 +201,27 @@ Amendments the code review surfaced; the code is the reference for these:
   write-shaped; after stage 1 an agent could in principle append a forged user line to the
   transcript file (needs a host-signed transcript to close); the transcript may lag the last
   tool call by a moment.
+
+## Second-round review (2026-09-02): fixed before merge
+
+- Delete-shaped commands are writes: `rm`, `rmdir`, `rd`, `del`, `erase`, `unlink`, `truncate`,
+  `Remove-Item`; and the `.claude` directory itself counts as the enforcement surface, so
+  `rm -rf .claude` is denied at every stage.
+- The surface basename check is case-insensitive (`claude.MD` on Windows/macOS).
+- The Stop-block cap is derived from the transcript, not a temp file (see Hardening).
+
+## Follow-ups (documented, not blocking)
+
+- False positives of the write heuristic now cost up to 8 blocked stops: `grep -rn 'cp ' src`,
+  `git checkout -b x`, `git pull`, `python -c 'print(1)'`. The quoted-word rule is the main
+  offender; refine it or narrow `git checkout` to the `--` and `HEAD --` forms.
+- `SURFACE_FILES` matches by basename anywhere, so a project's own `settings.json` or `apply.py`
+  is operator-owned at every stage. Scope to the `.claude/` parent and this skill's scripts.
+- Uncovered cheap writer forms: `nohup|time|nice|xargs|command cp`, `git -C . commit`,
+  `git --no-pager commit`, `cmd /c copy`, `py -c`, `printf code | python -`, `bun -e`, `php -r`,
+  `sed -e x -i f`, `rsync`, `ln -sf`, `vim -c wq`. Heuristic ceiling; add the cheap ones.
+- MCP name matching is substring-based (`run`, `update`) and gates some read-only tools while
+  missing `set_*`, `put`, `append`, `evaluate_script`.
+- An unquoted Windows path with backslashes in a hand-typed bootstrap loses them to shlex and is
+  denied; SKILL.md quotes the path, so this is a note only.
+- Helper-only coverage for non-shell writers and failed Skill calls; add one subprocess case each.
