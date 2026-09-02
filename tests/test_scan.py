@@ -381,7 +381,7 @@ def test_registered_gate_is_reported_for_reaudit(tmp_path):
     assert inv["project"]["loadout"]["gate"] == "claude-code"
     out = run_scan(h, [str(proj)]).stdout
     assert "enforcement gate registered (claude-code)" in out
-    assert "scripts/gate.py" in scan.SKILL_FILES
+    assert "scripts/gate.py" in scan.SKILL_FILES and "scripts/gate_codex.py" in scan.SKILL_FILES
 
 
 def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):

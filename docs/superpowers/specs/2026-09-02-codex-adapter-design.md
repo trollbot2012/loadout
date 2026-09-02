@@ -36,6 +36,21 @@ run before the matrix row says `proven`.
 - Stop block feedback is injected as the next user prompt, so consecutive blocks are counted from
   `UserMessage` items containing the gate's reason text, reset by a skill invocation.
 
+## Facts added by the recorder probes (2026-09-02, live)
+
+- PreToolUse stdin is Claude-shaped: `tool_name` is `Bash` with `tool_input.command` for shell, and
+  `apply_patch` with the patch text as `tool_input.command` for edits; `transcript_path`, `cwd`,
+  `session_id`, `turn_id`, `tool_use_id`, `permission_mode` are present.
+- Stop stdin carries `session_id`, `stop_hook_active`, `last_assistant_message`, `cwd`, but NO
+  `transcript_path`; the gate locates `<CODEX_HOME>/sessions/*/*/*/rollout-*-<session_id>.jsonl`.
+- The `& "<python>" "<gate.py>" <mode> --host codex` form runs under Codex's PowerShell hook shell
+  (probe: both PreToolUse and Stop completed); an unquoted-call form with a quoted path fails.
+- Skill use has no rollout event. It appears as the user's `$name` mention and as a
+  `CommandExecution` whose `parsed_cmd` reads `<skills root>/<name>/SKILL.md`; both count, the read
+  is the stronger signal and resets the block run.
+- Headless `codex exec` must run with stdin closed (`< /dev/null`) or it waits for more prompt input.
+- `--approve-for-me` cannot be combined with `-s`; use `-s workspace-write -c approval_policy="never"`.
+
 ## Components
 
 - `scripts/gate_codex.py`: `transcript_facts(path) -> gate.Facts`, `is_codex_transcript(path)`.
