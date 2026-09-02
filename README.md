@@ -50,7 +50,7 @@ host's native instruction file (`CLAUDE.md` with an `@AGENTS.md` import, `GEMINI
 `QWEN.md`). Re-audits replace the section instead of adding another. The run ends by naming the
 first task and starting it, not by saving a file.
 
-## Enforcement (Claude Code)
+## Enforcement (Claude Code and Codex CLI)
 
 `apply.py --host claude-code` also registers `scripts/gate.py` as a PreToolUse and Stop hook
 in the project's `.claude/settings.local.json` (local: the command embeds this machine's
@@ -70,7 +70,12 @@ the session transcript itself (nothing on disk, so a fresh session inherits noth
 has the same override); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
-Other hosts keep prose wiring in this version.
+Codex CLI: `apply.py --host codex` registers the same gate in the user-level `~/.codex/hooks.json`
+and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads
+the rollout transcript, treats `apply_patch` as an edit, counts a skill as invoked when its SKILL.md
+is read or `$name` is mentioned, and caps consecutive Stop blocks at 8 because Codex has no cap of
+its own. Proven live 2026-09-02. Cursor and Grok read Claude-format hooks but are unverified. Every
+other host keeps prose wiring; see `docs/host-capability-matrix.md`.
 
 Self-install, check and update from a source checkout:
 

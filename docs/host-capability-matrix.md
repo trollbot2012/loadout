@@ -11,7 +11,7 @@ no live run), `not started`, `n/a` (no mechanism).
 | Host | Pre-tool deny | Stop block | Ledger source | Proof status |
 |---|---|---|---|---|
 | Claude Code | hard | hard (host cap 8) | `transcript_path` JSONL | **proven** 2026-09-02 (gate.py v1.4.0) |
-| Codex CLI | hard | hard | `transcript_path` rollout JSONL | not started (next) |
+| Codex CLI | hard | hard (no host cap; gate cap 8) | rollout JSONL via `transcript_path` (pre) / session id (stop) | **proven** 2026-09-02 (gate_codex, v1.5.0) |
 | Qwen Code | hard | hard | `transcript_path` JSONL | not started |
 | Gemini CLI | hard | hard (re-prompt) | `transcript_path` | not started |
 | Copilot CLI | hard (timeout fails open) | hard (cap 8) | `session-state/<id>/events.jsonl` (schema undocumented) | not started |
@@ -33,13 +33,14 @@ no live run), `not started`, `n/a` (no mechanism).
 - Ledger: `transcript_path` JSONL; `Skill` tool_use blocks carry `input.skill`; slash commands appear as `<command-name>/x</command-name>` in user content; Stop blocks appear as user lines starting `Stop hook feedback:`.
 - Source: https://code.claude.com/docs/en/hooks-guide.md
 
-### Codex CLI (next)
+### Codex CLI (proven)
 - Config: `~/.codex/hooks.json`, `~/.codex/config.toml [hooks]`, `<repo>/.codex/hooks.json` (trusted layer only). Claude-shaped `{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":...}]}]}}`; `[features] hooks = true` default on.
 - Events: SessionStart, SessionEnd, SubagentStart, SubagentStop, PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, UserPromptSubmit, Stop, Interrupt.
 - Deny: exit 2 + stderr, or exit 0 with `hookSpecificOutput.permissionDecision:"deny"` (+`permissionDecisionReason`); legacy `{"decision":"block"}`. Only sync hooks block. Reason surfaces as model-visible Feedback.
 - Block: Stop `{"decision":"block","reason":...}` or exit 2; `stop_hook_active` on stdin; matchers ignored for Stop.
-- Stdin: `session_id, turn_id, cwd, hook_event_name, model, permission_mode, transcript_path` (nullable); PreToolUse adds `tool_name, tool_input, tool_use_id`. **Hook env is not inherited** (`env_clear` + session snapshot): `LOADOUT_ENFORCE=0` must be set in the hook command or config, not the shell.
-- Ledger: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`; lines `session_meta`, `turn_context`, `event_msg`, `response_item`. **How a skill invocation appears is not documented**; to be discovered live.
+- Stdin: `session_id, turn_id, cwd, hook_event_name, model, permission_mode, transcript_path` (nullable); PreToolUse adds `tool_name, tool_input, tool_use_id`. Hook env = the Codex process's own environment snapshot replayed after `env_clear` (verified in source and by a recorder hook), so `LOADOUT_ENFORCE=0` set in the shell that launches Codex reaches the gate.
+- Ledger: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`; lines `session_meta`, `turn_context`, `event_msg`, `response_item`. Verified live: edits = `item_completed` FileChange, shell = CommandExecution (`parsed_cmd` reads), skill use = user `$name` mention or a read of `<skills>/<name>/SKILL.md`, injected Stop-block reason = `HookPrompt` item. PreToolUse stdin is Claude-shaped (`Bash`, `apply_patch`); Stop stdin has no `transcript_path` (located by `session_id`). Hooks run through PowerShell here: `command_windows` uses the call operator. Codex has no block cap; the gate's cap of 8 is the only guard.
+- Proof (headless `codex exec`, 2026-09-02): run 1 without a skill: edit denied, Stop blocked 8 times then released by the cap, README untouched. Run 2 with `$planning-with-files`: skill read counted, edit allowed, Stop blocked with review missing until the review skill was read.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json
 
 ### Qwen Code

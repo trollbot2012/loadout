@@ -1,6 +1,6 @@
 # Codex CLI adapter for the enforcement gate
 
-Date: 2026-09-02 | Status: in progress | Target: loadout v1.5.0 | Matrix row: `docs/host-capability-matrix.md`
+Date: 2026-09-02 | Status: proven live 2026-09-02 | Target: loadout v1.5.0 | Matrix row: `docs/host-capability-matrix.md`
 
 ## Goal
 
