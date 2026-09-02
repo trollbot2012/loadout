@@ -300,3 +300,20 @@ def test_apply_codex_grants_trust(tmp_path, monkeypatch):
     res = apply.apply(tmp_path, "codex")
     assert "trust granted" in res["~/.codex/hooks.json"] and "skipped" not in res["~/.codex/hooks.json"]
     assert (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8").count("trusted_hash") == 2
+
+
+def test_trust_codex_gate_ignores_comments_and_never_duplicates_a_key(tmp_path):
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    key = f"{hooks}:pre_tool_use:0:0"
+    # a commented-out header must not be treated as the section; a section with an extra line between
+    # header and hash must be replaced whole, never left with two trusted_hash keys (Codex would fail to parse)
+    cfg.write_bytes((f"# [hooks.state.'{key}']\n# trusted_hash = \"sha256:old\"\n\n[hooks.state.'{key}']\n"
+                     f"# note\ntrusted_hash = \"sha256:stale\"\n\n[other]\nk = 1\n").encode("utf-8"))
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert text.startswith(f"# [hooks.state.'{key}']\n# trusted_hash = \"sha256:old\"\n"), "comment lines untouched"
+    assert "sha256:stale" not in text and text.count("trusted_hash") == 3  # commented one + 2 real
+    assert text.rstrip().endswith("[other]\nk = 1") or "[other]\nk = 1" in text
+    section = text.split(f"[hooks.state.'{key}']\n")[-1]
+    assert section.startswith("trusted_hash = \"sha256:")

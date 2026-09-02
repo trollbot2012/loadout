@@ -22,8 +22,9 @@ run before the matrix row says `proven`.
   replay), so `LOADOUT_ENFORCE=0` set in the launching shell reaches the gate.
 - Untrusted hooks are skipped silently, never failed. Trust = `[hooks.state.'<file>:<event>:<i>:<j>']
   trusted_hash` in config.toml (SHA-256 of the normalised handler). `codex exec` has
-  `--dangerously-bypass-hook-trust` for automation. Whether apply.py can compute the hash is a
-  spike in progress; until proven, trust is an operator step (`/hooks` once).
+  `--dangerously-bypass-hook-trust` for automation. The hash is reproduced in apply.py
+  (`codex_hook_hash`, verified against every recorded entry on a real machine), so apply grants trust
+  itself; `/hooks` is never needed.
 - Project-level `.codex/hooks.json` loads only for trusted projects. Registration is therefore
   user-level (`~/.codex/hooks.json`, `CODEX_HOME` honoured): the gate is a no-op wherever no
   LOADOUT.md is found, so one registration serves every project.
@@ -31,10 +32,10 @@ run before the matrix row says `proven`.
   `session_meta.payload.cwd`; `event_msg/item_completed` items `FileChange` (changes map),
   `CommandExecution` (command list + cwd), `UserMessage` (prompt text); `response_item/custom_tool_call`
   named `exec` whose input is JS calling `tools.apply_patch` / `tools.exec_command`.
-  Skill use: the user's `$name` mention counts as an invocation; the rollout representation of the
-  injected skill is being probed and gets one extra parser rule when known.
-- Stop block feedback is injected as the next user prompt, so consecutive blocks are counted from
-  `UserMessage` items containing the gate's reason text, reset by a skill invocation.
+  Skill use: the user's `$name` mention counts, and so does a `CommandExecution` whose `parsed_cmd`
+  reads `<skills root>/<name>/SKILL.md` (verified live; there is no skill event).
+- Stop block feedback is injected as the next prompt and recorded as an `item_completed` of type
+  `HookPrompt` (fragments[].text); consecutive blocks are counted from those, reset by a skill invocation.
 
 ## Facts added by the recorder probes (2026-09-02, live)
 
@@ -65,11 +66,21 @@ run before the matrix row says `proven`.
 
 ## Live proof (required)
 
-Headless `codex exec --approve-for-me --dangerously-bypass-hook-trust` in a trusted scratch
-project carrying a LOADOUT.md: (1) an edit requested with no skill mentioned is denied with the
+Headless `codex exec -s workspace-write -c approval_policy="never" -c 'sandbox_permissions=["disk-full-read-access"]'
+--dangerously-bypass-hook-trust -c 'projects."<dir>".trust_level="trusted"' < /dev/null` in a long-form-path
+scratch project carrying a LOADOUT.md (ran 2026-09-02, both runs passed): (1) an edit requested with no skill mentioned is denied with the
 gate reason; (2) after a `$<stage-1 skill>` mention and an edit, stopping is blocked naming the
 missing stages, repeatedly, with the file state checked afterwards.
 
 ## Out of scope
 
 Every other host. Cursor and Grok stay `unverified` even though they read Claude-format hooks.
+
+## Second-round review (2026-09-02)
+
+- `*** Move to:` targets in an apply_patch are checked against the surface too.
+- The Codex hook config is enforcement surface: `hooks.json` and `config.toml` under any `.codex`
+  directory are operator-owned at every stage; a project's own `config.toml` is not.
+- `trust_codex_gate` matches `[hooks.state.'<key>']` sections line-anchored and replaces the whole
+  section up to the next table header, so a stray comment can never leave two `trusted_hash` keys.
+- `find_rollout` escapes the session id before globbing.

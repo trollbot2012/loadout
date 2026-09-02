@@ -159,11 +159,13 @@ def trust_codex_gate(hooks_path=None, config_path=None):
     changed = False
     for key, digest in wanted.items():
         header = f"[hooks.state.'{key}']"
-        section = re.compile(re.escape(header) + r"\r?\n(?:[ \t]*trusted_hash[ \t]*=[ \t]*\"[^\"]*\"[ \t]*)?", re.M)
+        # the header at line start, then every following non-blank line that is not a table header:
+        # the whole section is replaced, so a stray comment can never leave two trusted_hash keys
+        section = re.compile(r"^" + re.escape(header) + r"[ \t]*(?:\r?\n(?!\[)(?![ \t]*\r?$)[^\r\n]*)*", re.M)
         replacement = f"{header}{nl}trusted_hash = \"{digest}\""
         m = section.search(text)
         if m:
-            if m.group(0).rstrip("\r\n") != replacement:
+            if m.group(0) != replacement:
                 text = text[:m.start()] + replacement + text[m.end():]
                 changed = True
         else:

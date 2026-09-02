@@ -26,7 +26,8 @@ from pathlib import Path
 import apply  # same directory; owns the Accepted-line grammar and the CLI flag set
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree", "apply_patch"}  # apply_patch: Codex
-PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$", re.M)
+PATCH_FILE_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)  # Move to: rename target
+CODEX_SURFACE = {"hooks.json", "config.toml"}  # operator-owned only under a .codex directory
 DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
 MCP_MUTATING_RE = re.compile(
     r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
@@ -49,7 +50,15 @@ _WORDS = (r"tee|sed\s+(?:-\w*i\S*|--in-place\S*)|perl\s+-\S*[ip]\S*|mv|cp|instal
 _WRITE_WORDS = re.compile(r"(?:^|[|;&(\x27\"])\s*" + _PREFIX + r"(?:" + _WORDS + r")(?=\s|$|[\x27\"])", re.I)
 # the enforcement surface: naming it in a command is gated before stage 1, and writing it is denied always
 _SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md"
-                        r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)", re.I)  # the .claude dir itself (rm -rf .claude)
+                        r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)"  # the .claude dir itself (rm -rf .claude)
+                        r"|\.codex[\\/](?:hooks\.json|config\.toml)", re.I)  # Codex hook registration + trust
+
+
+def is_surface(path):
+    """Operator-owned enforcement config: the Claude files anywhere, the Codex files under .codex."""
+    parts = re.split(r"[\\/]", str(path))
+    name = parts[-1].lower()
+    return name in SURFACE_FILES or (name in CODEX_SURFACE and ".codex" in (p.lower() for p in parts[:-1]))
 
 # cwd = where the session started (first transcript line); blocks = consecutive Stop blocks since the
 # last real skill invocation, read from the transcript itself so nothing persists across sessions
@@ -268,7 +277,7 @@ def decide(mode, hook, env=None, host=None):
             if not (write_shaped(cmd) or sensitive(cmd)):
                 return None
         elif is_edit_tool(tool):
-            hit = next((p for p in _target_paths(inp) if _basename(p).lower() in SURFACE_FILES), None)
+            hit = next((p for p in _target_paths(inp) if is_surface(p)), None)
             if hit:  # case-insensitive filesystems; every file of a multi-file patch is checked
                 return _deny(f"Loadout gate: `{_basename(hit)}` is operator-owned enforcement config; "
                              f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")

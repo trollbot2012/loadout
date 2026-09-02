@@ -232,3 +232,30 @@ def test_stop_block_cap_counts_hook_prompt_items(tmp_path):
     assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None, "cap: allow"
     t = rollout(tmp_path, base + [block] * gate.STOP_BLOCK_CAP + [user("$reviewer")])
     assert gate_codex.transcript_facts(t).blocks == 0, "a skill invocation resets the run"
+
+
+def test_apply_patch_move_to_surface_file_is_denied(tmp_path):
+    proj = project(tmp_path)
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner go")])
+    rename = "*** Begin Patch\n*** Update File: notes.md\n*** Move to: LOADOUT.md\n@@\n-a\n+b\n*** End Patch"
+    hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": rename}, tool_use_id="e1")
+    out = run_gate("pre", hook, host="codex")
+    assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_codex_hook_config_is_operator_owned_surface(tmp_path):
+    proj = project(tmp_path)
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner go")])  # stage 1 done: only the surface is gated
+    patch = lambda path: f"*** Begin Patch\n*** Update File: {path}\n@@\n-a\n+b\n*** End Patch"  # noqa: E731
+    for target in [".codex/hooks.json", str(tmp_path / "home" / ".codex" / "config.toml"), "~/.codex/hooks.json"]:
+        hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": patch(target)})
+        out = run_gate("pre", hook, host="codex")
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", target
+    hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": patch("config.toml")})
+    assert run_gate("pre", hook, host="codex") is None, "a project's own config.toml is not enforcement surface"
+    for cmd in ['Set-Content ~/.codex/hooks.json "{}"', "echo x > .codex/config.toml", "rm ~/.codex/config.toml"]:
+        hook = codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": cmd})
+        out = run_gate("pre", hook, host="codex")
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", cmd
+    hook = codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "cat ~/.codex/config.toml"})
+    assert run_gate("pre", hook, host="codex") is None, "reading the surface after stage 1 is fine"

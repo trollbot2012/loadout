@@ -5,6 +5,7 @@ Codex appends ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread>.jsonl; every li
 {"timestamp", "type", "payload"}. Same tolerance contract as gate.py: bad lines are skipped,
 a missing file is an empty Facts, nothing raises.
 """
+import glob
 import json
 import os
 import re
@@ -38,7 +39,7 @@ def find_rollout(session_id, home=None):
         return None
     root = Path(home or os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "sessions"
     try:
-        hits = sorted(root.glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
+        hits = sorted(root.glob(f"*/*/*/rollout-*-{glob.escape(str(session_id))}.jsonl"))
     except OSError:
         return None
     return str(hits[-1]) if hits else None
