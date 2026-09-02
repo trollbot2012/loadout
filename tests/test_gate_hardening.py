@@ -87,8 +87,10 @@ def test_bootstrap_must_be_this_skills_apply_py(tmp_path):
     assert denied(pre_hook(proj, t, "Bash", command=f'python "{evil}" . --host claude-code'))
     assert denied(pre_hook(proj, t, "Bash", command="python x/apply.py . --host claude-code"))
     assert run_gate("pre", pre_hook(proj, t, "Bash", command=f'python "{APPLY}" . --host claude-code')) is None
-    rel = os.path.relpath(APPLY, proj)
-    assert gate.bootstrap_invocation(f'python "{rel}" .', cwd=str(proj))
+    # a relative script path resolves against the hook cwd; run from the skill dir like SKILL.md says
+    # (no relpath from tmp_path: on CI Windows the temp dir and the repo sit on different drives)
+    assert gate.bootstrap_invocation('python "scripts/apply.py" .', cwd=str(APPLY.parent.parent))
+    assert not gate.bootstrap_invocation('python "scripts/apply.py" .', cwd=str(proj))
 
 
 def test_cd_above_the_project_does_not_blind_the_gate(tmp_path):
