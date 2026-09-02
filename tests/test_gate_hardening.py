@@ -46,22 +46,47 @@ def test_transcript_first_cwd_is_recorded(tmp_path):
     assert gate.transcript_facts(p).cwd == str(tmp_path / "proj")
 
 
-def test_stop_gate_is_not_a_one_shot_nag_but_is_capped(tmp_path):
+BLOCK_MSG = "Stop hook feedback:\nLoadout gate: stages not run this session: review (`reviewer`). Invoke them, then stop."
+
+
+def test_stop_gate_is_not_a_one_shot_nag_but_is_capped_from_the_transcript(tmp_path):
     proj = project(tmp_path)
-    t = transcript(tmp_path, [[skill("planner")], [tool("Edit", file_path="a.py")]])
     sid = f"pytest-{os.getpid()}-{tmp_path.name}"
-    counter = Path(tempfile.gettempdir()) / f"loadout-gate-{sid}.blocks"
-    if counter.exists():
-        counter.unlink()
-    try:
-        hook = dict(stop_hook(proj, t, active=True), session_id=sid)
-        for i in range(gate.STOP_BLOCK_CAP):
-            out = run_gate("stop", hook)
-            assert out and out["decision"] == "block", f"block {i + 1} must still fire with stop_hook_active"
-        assert run_gate("stop", hook) is None, "own cap: allow after STOP_BLOCK_CAP blocks"
-    finally:
-        if counter.exists():
-            counter.unlink()
+    edited = [[skill("planner")], [tool("Edit", file_path="a.py")]]
+    # with stop_hook_active the gate still blocks: no one-shot nag
+    t = transcript(tmp_path, edited)
+    out = run_gate("stop", dict(stop_hook(proj, t, active=True), session_id=sid))
+    assert out and out["decision"] == "block"
+    # the cap counts consecutive block messages already in this transcript, nothing on disk
+    t = transcript(tmp_path, edited + [BLOCK_MSG] * (gate.STOP_BLOCK_CAP - 1))
+    assert run_gate("stop", dict(stop_hook(proj, t, active=True), session_id=sid))["decision"] == "block"
+    t = transcript(tmp_path, edited + [BLOCK_MSG] * gate.STOP_BLOCK_CAP)
+    assert run_gate("stop", dict(stop_hook(proj, t, active=True), session_id=sid)) is None, "cap reached"
+    assert not list(Path(tempfile.gettempdir()).glob(f"loadout-gate-{sid}*")), "no counter file may exist"
+    # progress (a real skill invocation) after the blocks resets the count
+    t = transcript(tmp_path, edited + [BLOCK_MSG] * gate.STOP_BLOCK_CAP + [[skill("unlazy")]])
+    assert run_gate("stop", dict(stop_hook(proj, t, active=True), session_id=sid))["decision"] == "block"
+    # a fresh transcript with the same session id inherits nothing
+    t = transcript(tmp_path, edited, name="fresh.jsonl")
+    assert run_gate("stop", dict(stop_hook(proj, t, active=True), session_id=sid))["decision"] == "block"
+
+
+def test_delete_shaped_commands_are_writes(tmp_path):
+    proj = project(tmp_path)
+    after_stage_one = transcript(tmp_path, [[skill("planner")]])
+    for cmd in ["rm LOADOUT.md", "rm -rf .claude", "del CLAUDE.md", "unlink AGENTS.md",
+                "truncate -s0 AGENTS.md", "Remove-Item .claude/settings.local.json", "rmdir /s .claude"]:
+        assert denied(pre_hook(proj, after_stage_one, "Bash", command=cmd)), cmd
+    assert run_gate("pre", pre_hook(proj, after_stage_one, "Bash", command="rm -rf build/")) is None, "plain rm after stage 1 is fine"
+    assert denied(pre_hook(proj, transcript(tmp_path, []), "Bash", command="rm -rf build/")), "but not before stage 1"
+
+
+def test_surface_check_is_case_insensitive(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[skill("planner")]])
+    for name in ["claude.MD", "Loadout.md", "SETTINGS.LOCAL.JSON", "Gate.PY"]:
+        assert denied(pre_hook(proj, t, "Write", file_path=str(proj / name), content="x")), name
+    assert run_gate("pre", pre_hook(proj, t, "Write", file_path=str(proj / "notes.md"), content="x")) is None
 
 
 def test_surface_is_operator_owned_at_every_stage(tmp_path):

@@ -19,7 +19,6 @@ import os
 import re
 import shlex
 import sys
-import tempfile
 import traceback
 from collections import namedtuple
 from pathlib import Path
@@ -31,7 +30,7 @@ DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of thi
 MCP_MUTATING_RE = re.compile(
     r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
     re.I)
-SURFACE_FILES = {"LOADOUT.md", "AGENTS.md", "CLAUDE.md", "settings.json", "settings.local.json", "gate.py", "apply.py"}
+SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py"}  # lower-cased
 COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 HATCH = "Operator hatch: LOADOUT_ENFORCE=0."
 STOP_BLOCK_CAP = 8  # own runaway guard; Claude Code applies the same cap on its side
@@ -42,14 +41,20 @@ _REDIRECT = re.compile(r"(?<![<>&])(?:[>＞]{1,2}|&>)(?!&)(?!\s*(?:/dev/null|NUL
 # (sh -c '...'), allowing sudo/env/VAR=x/path prefixes
 _PREFIX = r"(?:(?:sudo|env)\s+|\w+=\S*\s+)*(?:\S*[\\/])?"
 _WORDS = (r"tee|sed\s+(?:-\w*i\S*|--in-place\S*)|perl\s+-\S*[ip]\S*|mv|cp|install|patch|dd|wget|touch"
+          r"|rm|rmdir|rd|del|erase|unlink|truncate|Remove-Item"  # deleting the surface is a write too
           r"|curl\s+(?:\S+\s+)*-[oO]\b"
           r"|git\s+(?:apply|checkout|restore|commit|stash|cherry-pick|merge|rebase|reset|clean|mv|rm|am|pull)"
           r"|(?:python\S*|node|ruby|perl)\s+-[ce]\b|powershell|pwsh|Set-Content|Out-File|Add-Content")
 _WRITE_WORDS = re.compile(r"(?:^|[|;&(\x27\"])\s*" + _PREFIX + r"(?:" + _WORDS + r")(?=\s|$|[\x27\"])", re.I)
 # the enforcement surface: naming it in a command is gated before stage 1, and writing it is denied always
-_SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md", re.I)
+_SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md"
+                        r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)", re.I)  # the .claude dir itself (rm -rf .claude)
 
-Facts = namedtuple("Facts", "invoked edited cwd")  # cwd = where the session started (first transcript line)
+# cwd = where the session started (first transcript line); blocks = consecutive Stop blocks since the
+# last real skill invocation, read from the transcript itself so nothing persists across sessions
+Facts = namedtuple("Facts", "invoked edited cwd blocks")
+STOP_FEEDBACK = "Stop hook feedback:"
+STOP_REASON = "Loadout gate: stages not run this session"
 
 
 def write_shaped(cmd):
@@ -69,10 +74,11 @@ def is_edit_tool(tool):
 def transcript_facts(path):
     """Facts(invoked skills, edited?, first cwd) from a JSONL transcript. Bad lines are skipped."""
     skills, errors, invoked, edited, first_cwd = [], set(), set(), False, None
+    events = []  # ("skill", tool_use_id) and ("block",) in transcript order, for the consecutive count
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except (OSError, TypeError):
-        return Facts(invoked, edited, first_cwd)
+        return Facts(invoked, edited, first_cwd, 0)
     for line in lines:
         try:
             d = json.loads(line)
@@ -89,6 +95,8 @@ def transcript_facts(path):
         if isinstance(content, str):
             if is_user:
                 invoked.update(COMMAND_RE.findall(content))
+                if content.startswith(STOP_FEEDBACK) and STOP_REASON in content:
+                    events.append(("block",))
             continue
         for block in content or []:
             if not isinstance(block, dict):
@@ -104,12 +112,16 @@ def transcript_facts(path):
                 name, inp = block.get("name"), block.get("input") or {}
                 if name == "Skill" and inp.get("skill"):
                     skills.append((block.get("id"), str(inp["skill"])))
+                    events.append(("skill", block.get("id")))
                 elif is_edit_tool(name) or name in DELEGATION_TOOLS:
                     edited = True
                 elif name == "Bash" and write_shaped(str(inp.get("command") or "")):
                     edited = True
     invoked.update(n for i, n in skills if i not in errors)  # a failed Skill call is not an invocation
-    return Facts(invoked, edited, first_cwd)
+    blocks = 0
+    for ev in events:  # a successful skill invocation is progress and resets the run of blocks
+        blocks = 0 if ev[0] == "skill" and ev[1] not in errors else blocks + (ev[0] == "block")
+    return Facts(invoked, edited, first_cwd, blocks)
 
 
 def find_loadout(*starts):
@@ -200,13 +212,6 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def _stop_blocks(session_id):
-    """Own runaway guard: count of Stop blocks this session; None when there is no session id."""
-    if not session_id:
-        return None
-    return Path(tempfile.gettempdir()) / f"loadout-gate-{session_id}.blocks"
-
-
 def decide(mode, hook, env=None):
     """The hook decision dict, or None to allow."""
     env = os.environ if env is None else env
@@ -238,7 +243,7 @@ def decide(mode, hook, env=None):
             if not (write_shaped(cmd) or sensitive(cmd)):
                 return None
         elif is_edit_tool(tool):
-            if _basename(target) in SURFACE_FILES:
+            if _basename(target).lower() in SURFACE_FILES:  # case-insensitive filesystems
                 return _deny(f"Loadout gate: `{_basename(target)}` is operator-owned enforcement config; "
                              f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")
         else:
@@ -258,19 +263,9 @@ def decide(mode, hook, env=None):
         missing = [(s, k) for s, k in stages if k not in facts.invoked]
         if not missing:
             return None
-        counter = _stop_blocks(hook.get("session_id"))
-        if counter is not None:
-            try:
-                n = int(counter.read_text()) if counter.is_file() else 0
-            except (OSError, ValueError):
-                n = 0
-            if n >= STOP_BLOCK_CAP:
-                sys.stderr.write(f"loadout gate: {n} consecutive Stop blocks this session; allowing (cap).\n")
-                return None
-            try:
-                counter.write_text(str(n + 1))
-            except OSError:
-                pass
+        if facts.blocks >= STOP_BLOCK_CAP:  # runaway guard, scoped to this transcript by construction
+            sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (cap).\n")
+            return None
         return {"decision": "block",
                 "reason": "Loadout gate: stages not run this session: "
                           + ", ".join(f"{s} (`{k}`)" for s, k in missing)
