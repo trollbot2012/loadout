@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """loadout apply — persist the accepted loadout into the project's agent instruction files, idempotently.
 
-Usage: python apply.py <project_dir> --host <host> [--loadout LOADOUT.md]
+Usage: python apply.py <project_dir> --host <host> [--loadout LOADOUT.md] [--no-enforce]
 
 Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'), builds the
 '## Loadout' block and upserts it (replace if present, else append, else create) into:
@@ -9,13 +9,52 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - the running host's native file: CLAUDE.md / GEMINI.md / QWEN.md. Claude Code does not read
     AGENTS.md, so a missing CLAUDE.md is created with an '@AGENTS.md' import line.
   - any other native file that already exists in the project (keeps every harness consistent).
+  - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
+    .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
+import json
 import re
 import sys
 from pathlib import Path
 
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
+GATE = Path(__file__).resolve().parent / "gate.py"
+GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+SETTINGS_LOCAL = ".claude/settings.local.json"
+
+
+def gate_hooks():
+    """Hook registrations for this machine's copy of gate.py (hence settings.local.json)."""
+    def cmd(mode):
+        return f'"{sys.executable}" "{GATE}" {mode}'
+    return {"PreToolUse": [{"matcher": GATE_MATCHER, "hooks": [{"type": "command", "command": cmd("pre")}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": cmd("stop")}]}]}
+
+
+def register_gate(project):
+    """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
+    path = Path(project) / SETTINGS_LOCAL
+    data, existed = {}, path.is_file()
+    if existed:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            raise ValueError(f"{path} is not valid JSON; fix it or pass --no-enforce")
+    hooks = data.setdefault("hooks", {})
+    changed = False
+    for event, entries in gate_hooks().items():
+        current = hooks.get(event, [])
+        kept = [e for e in current if not any("gate.py" in h.get("command", "") for h in e.get("hooks", []))]
+        new = kept + entries
+        if new != current:
+            hooks[event] = new
+            changed = True
+    if existed and not changed:
+        return "unchanged"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return "updated" if existed else "created"
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
 IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
@@ -63,7 +102,7 @@ def upsert(path, blk, create_with=None):
     return action
 
 
-def apply(project, host, loadout="LOADOUT.md"):
+def apply(project, host, loadout="LOADOUT.md", enforce=True):
     project = Path(project)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
     accepted = parse_accepted(text)
@@ -82,6 +121,8 @@ def apply(project, host, loadout="LOADOUT.md"):
     for other in NATIVE.values():
         if other != native and (project / other).is_file():
             results[other] = upsert(project / other, blk)
+    if enforce and host == "claude-code":
+        results[SETTINGS_LOCAL] = register_gate(project) + " (gate hooks take effect from the next Claude Code session)"
     return results
 
 
@@ -92,12 +133,14 @@ def main():
     argv = sys.argv[1:]
     host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
     loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
-    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or not argv[i - 1].startswith("--"))]
+    enforce = "--no-enforce" not in argv
+    value_flags = {"--host", "--loadout"}  # only these consume the token after them
+    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in value_flags)]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     try:
-        results = apply(args[0], host, loadout)
+        results = apply(args[0], host, loadout, enforce)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
