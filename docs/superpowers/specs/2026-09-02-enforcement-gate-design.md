@@ -41,12 +41,31 @@ Silent allow (exit 0, no output) when any of:
   NotebookEdit tool_use and no write-shaped Bash command), so question-only sessions
   are never trapped
 - `pre` mode for Bash and the command is not write-shaped
+- `pre` mode for Bash and the command is exactly a validated `apply.py` bootstrap
+  invocation (see "Bootstrap boundary" below)
+
+### Bootstrap boundary (no blanket exemption)
+
+The loadout-apply phase is a one-time bootstrap that runs before enforcement is installed.
+After activation, writes to LOADOUT.md, AGENTS.md and CLAUDE.md are gated like every other
+mutation: an agent must not be able to alter the enforced workflow before satisfying it.
+The single exception is re-running the bootstrap itself, and only in its exact shape:
+
+- the command has no `|`, `;`, `&`, `<`, `>`, backtick, `$(` or newline
+- tokens (shlex, POSIX rules) are: an interpreter whose basename is `python`, `python3`,
+  `python.exe` or `py`, or equals `sys.executable`; a script whose basename is `apply.py`;
+  exactly one positional project-dir token; and any of `--host <x>`, `--loadout <y>`,
+  `--no-enforce`; nothing else
+- Edit/Write/MultiEdit/NotebookEdit calls targeting those files are never exempt
+
+A re-audit that changes the accepted set therefore needs the stage-1 skill to have run
+first, or the operator hatch for that session. That is deliberate.
 
 Invoked set: every `tool_use` block in the transcript with `name == "Skill"` contributes
 `input.skill`; every user message containing `<command-name>/<x></command-name>`
 contributes `x`. Match is exact against the accepted skill string.
 
-`pre` decision: stage 1 = first binding line. If its skill is not in the invoked set, emit
+`pre` decision: stage 1 = first binding line. Bootstrap invocations (above) are allowed first. If its skill is not in the invoked set, emit
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
