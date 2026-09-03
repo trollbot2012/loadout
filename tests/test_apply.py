@@ -300,6 +300,9 @@ def test_codex_foreign_root_level_key_is_preserved_and_reported(codex_hooks):
     assert data["PreToolUse"] == existing["PreToolUse"], "third-party root-level data must never be destroyed"
     assert "PreToolUse" in action, "the leftover stray key is reported back to the caller"
     assert len(gate_cmds(data, "PreToolUse")) == 1  # our own gate entry still lands correctly under hooks
+    # the root stays invalid on purpose (that foreign key is not ours to move), so the oracle is applied
+    # to the part we do own: everything we wrote under "hooks" is still a schema-valid envelope
+    assert_codex_schema_valid({"hooks": data["hooks"]})
 
 
 def test_codex_apply_is_idempotent(codex_hooks):
@@ -309,6 +312,7 @@ def test_codex_apply_is_idempotent(codex_hooks):
     assert apply.register_codex_gate(codex_hooks) == "unchanged"
     assert codex_hooks.read_bytes() == first
     data = json.loads(first)
+    assert_codex_schema_valid(data)
     for event in ("PreToolUse", "Stop"):
         assert len(gate_cmds(data, event)) == 1
 
@@ -328,6 +332,7 @@ def test_codex_host_writes_agents_md_and_user_hooks(tmp_path, codex_hooks):
     assert res["AGENTS.md"] == "created" and set(res) == {"AGENTS.md", "~/.codex/hooks.json"}
     assert res["~/.codex/hooks.json"].startswith("created" + CODEX_NOTE)
     assert codex_hooks.is_file() and not (tmp_path / ".claude").exists()
+    assert_codex_schema_valid(json.loads(codex_hooks.read_text(encoding="utf-8")))
     assert apply.apply(tmp_path, "codex")["~/.codex/hooks.json"].startswith("unchanged; trust already present")
     assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False)
     assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "claude-code")
