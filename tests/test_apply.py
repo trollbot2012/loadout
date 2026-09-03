@@ -185,49 +185,132 @@ def test_register_gate_keeps_sibling_hooks_inside_the_same_entry(tmp_path):
 
 # ---------------------------------------------------------------- Codex CLI (user-level hooks.json)
 
+def assert_codex_schema_valid(data):
+    """Codex's hooks.json root accepts ONLY "description"/"hooks" -- an unrecognised root key fails
+    to load every hook in the file, not just an invalid one (the live bug this module fixes). This
+    checks Codex-schema validity, not merely that the file is valid JSON: root keys, the hooks-map
+    shape, each group's shape, and that every handler carries only known fields."""
+    assert isinstance(data, dict)
+    assert set(data) <= {"description", "hooks"}
+    hooks = data.get("hooks", {})
+    assert isinstance(hooks, dict)
+    for event, groups in hooks.items():
+        assert isinstance(event, str)
+        assert isinstance(groups, list)
+        for group in groups:
+            assert isinstance(group, dict)
+            assert set(group) <= {"matcher", "hooks"}
+            handlers = group.get("hooks", [])
+            assert isinstance(handlers, list)
+            for h in handlers:
+                assert isinstance(h, dict)
+                assert set(h) <= {"type", "command", "commandWindows", "timeout", "description"}
+                assert h.get("type") == "command"
+                assert h.get("command")
+
+
 def gate_cmds(data, event):
-    return [(h["command"], h["command_windows"]) for e in data[event] for h in e["hooks"] if "gate.py" in h["command"]]
+    return [(h["command"], h["commandWindows"]) for e in data["hooks"][event] for h in e["hooks"] if "gate.py" in h["command"]]
 
 
 def test_codex_hooks_created_with_both_events_and_command_forms(codex_hooks):
     assert apply.register_codex_gate(codex_hooks) == "created"
     data = json.loads(codex_hooks.read_text(encoding="utf-8"))
-    assert set(data) == {"PreToolUse", "Stop"}
-    assert "matcher" not in data["PreToolUse"][0]
+    assert_codex_schema_valid(data)
+    assert set(data) == {"hooks"}  # fresh file: a valid envelope, gate under "hooks"
+    assert set(data["hooks"]) == {"PreToolUse", "Stop"}
+    assert "matcher" not in data["hooks"]["PreToolUse"][0]
     for event, mode in (("PreToolUse", "pre"), ("Stop", "stop")):
         (posix, win), = gate_cmds(data, event)
         assert posix == f'"{sys.executable}" "{apply.GATE}" {mode} --host codex'
         assert win == "& " + posix
-        assert data[event][0]["hooks"][0]["timeout"] == 20
+        assert data["hooks"][event][0]["hooks"][0]["timeout"] == 20
     raw = codex_hooks.read_bytes()
     assert raw.endswith(b"}\n") and b"\r\n" not in raw
     assert apply.register_codex_gate(codex_hooks) == "unchanged"
-    assert len(json.loads(codex_hooks.read_text(encoding="utf-8"))["PreToolUse"]) == 1
+    assert len(json.loads(codex_hooks.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]) == 1
 
 
 def test_codex_hooks_preserve_foreign_entries_and_replace_stale_gate(codex_hooks):
+    # a realistic real-world file: every tool's entries (including devteam-codex's) already live under
+    # the root "hooks" object, one of them already using commandWindows -- none of this is ours to touch
     codex_hooks.parent.mkdir(parents=True)
-    existing = {
-        "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "post-bash"}]}],
+    existing = {"description": "team hooks", "hooks": {
+        "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+            "command": 'node devteam-codex.mjs hook PostToolUse',
+            "commandWindows": '& node devteam-codex.mjs hook PostToolUse'}]}],
         "SessionStart": [{"hooks": [{"type": "command", "command": "session-a"}]},
                          {"hooks": [{"type": "command", "command": "session-b"}]}],
         "Stop": [{"hooks": [{"type": "command", "command": "foreign-stop"},
                             {"type": "command", "command": 'python "old/gate.py" stop --host codex',
-                             "command_windows": '& python "old/gate.py" stop --host codex'}]}],
-        "PreToolUse": [{"hooks": [{"type": "command", "command": 'python "old/gate.py" pre --host codex'}]}],
-        "$schema": "x"}
+                             "commandWindows": '& python "old/gate.py" stop --host codex'}]}],
+        "PreToolUse": [{"hooks": [{"type": "command", "command": 'python "old/gate.py" pre --host codex'}]}]}}
+    before = json.loads(json.dumps(existing))  # deep copy: compare untouched parts against this, not `existing`
     codex_hooks.write_text(json.dumps(existing), encoding="utf-8")
     assert apply.register_codex_gate(codex_hooks) == "updated"
     data = json.loads(codex_hooks.read_text(encoding="utf-8"))
-    assert data["PostToolUse"] == existing["PostToolUse"]
-    assert data["SessionStart"] == existing["SessionStart"]
-    assert data["$schema"] == "x"
+    assert_codex_schema_valid(data)
+    assert set(data) == {"hooks", "description"}
+    assert data["description"] == "team hooks"
+    assert data["hooks"]["PostToolUse"] == before["hooks"]["PostToolUse"]
+    assert data["hooks"]["SessionStart"] == before["hooks"]["SessionStart"]
     assert "old/gate.py" not in json.dumps(data)
-    stop_cmds = [h["command"] for e in data["Stop"] for h in e["hooks"]]
+    stop_cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
     assert "foreign-stop" in stop_cmds
     for event in ("PreToolUse", "Stop"):
         assert len(gate_cmds(data, event)) == 1
-    assert len(data["PreToolUse"]) == 1
+    assert len(data["hooks"]["PreToolUse"]) == 1
+
+
+def test_codex_migrates_stray_root_level_gate_keys_from_the_live_bug(codex_hooks):
+    # the live bug, reproduced: an earlier apply wrote its own gate entries as root-level "PreToolUse"/
+    # "Stop" keys (invalid per Codex's schema), alongside a valid root "hooks" object for another tool
+    codex_hooks.parent.mkdir(parents=True)
+    posix_pre = f'"{sys.executable}" "{apply.GATE}" pre --host codex'
+    posix_stop = f'"{sys.executable}" "{apply.GATE}" stop --host codex'
+    existing = {
+        "hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "devteam-codex.mjs hook PostToolUse"}]}]},
+        "PreToolUse": [{"hooks": [{"type": "command", "command": posix_pre,
+                                    "commandWindows": "& " + posix_pre, "timeout": 20}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": posix_stop,
+                              "commandWindows": "& " + posix_stop, "timeout": 20}]}]}
+    codex_hooks.write_text(json.dumps(existing), encoding="utf-8")
+    assert apply.register_codex_gate(codex_hooks) == "updated"
+    data = json.loads(codex_hooks.read_text(encoding="utf-8"))
+    assert_codex_schema_valid(data)
+    assert set(data) == {"hooks"}
+    assert "PreToolUse" not in data and "Stop" not in data  # the invalid root-level keys are gone
+    assert data["hooks"]["PostToolUse"] == existing["hooks"]["PostToolUse"]  # nothing else was lost
+    for event in ("PreToolUse", "Stop"):
+        assert len(gate_cmds(data, event)) == 1  # migrated, not duplicated
+    before = codex_hooks.read_bytes()
+    assert apply.register_codex_gate(codex_hooks) == "unchanged"
+    assert codex_hooks.read_bytes() == before
+
+
+def test_codex_foreign_root_level_key_is_preserved_and_reported(codex_hooks):
+    # a root-level event key that is NOT ours (someone/something else's mistake, or a future Codex
+    # feature this code doesn't know about yet) must never be silently deleted or absorbed
+    codex_hooks.parent.mkdir(parents=True)
+    existing = {"hooks": {}, "PreToolUse": [{"hooks": [{"type": "command", "command": "someone-elses-tool"}]}]}
+    codex_hooks.write_text(json.dumps(existing), encoding="utf-8")
+    action = apply.register_codex_gate(codex_hooks)
+    data = json.loads(codex_hooks.read_text(encoding="utf-8"))
+    assert data["PreToolUse"] == existing["PreToolUse"], "third-party root-level data must never be destroyed"
+    assert "PreToolUse" in action, "the leftover stray key is reported back to the caller"
+    assert len(gate_cmds(data, "PreToolUse")) == 1  # our own gate entry still lands correctly under hooks
+
+
+def test_codex_apply_is_idempotent(codex_hooks):
+    codex_hooks.parent.mkdir(parents=True)
+    apply.register_codex_gate(codex_hooks)
+    first = codex_hooks.read_bytes()
+    assert apply.register_codex_gate(codex_hooks) == "unchanged"
+    assert codex_hooks.read_bytes() == first
+    data = json.loads(first)
+    for event in ("PreToolUse", "Stop"):
+        assert len(gate_cmds(data, event)) == 1
 
 
 def test_codex_invalid_hooks_json_is_an_error_before_any_write(tmp_path, codex_hooks):
@@ -292,6 +375,23 @@ def test_trust_codex_gate_upserts_hooks_state_and_preserves_the_rest(tmp_path):
     fresh = tmp_path / "fresh.toml"
     assert apply.trust_codex_gate(hooks, fresh) == "trusted"
     assert fresh.read_text(encoding="utf-8").count("trusted_hash") == 2
+
+
+def test_trust_codex_gate_keys_match_nested_positions_not_root(tmp_path):
+    # a foreign group sits before ours under "hooks"; the trust key's gi must reflect that nested
+    # index. Nothing lives at the (invalid) hooks.json root, so the pre-fix code -- which walked
+    # data.get("PreToolUse", []) at the root -- would find nothing here at all.
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    ours = {"type": "command", "command": f'"{sys.executable}" "{apply.GATE}" pre --host codex',
+            "commandWindows": "& x", "timeout": 20}
+    data = {"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "foreign"}]},
+        {"hooks": [ours]}]}}
+    hooks.write_text(json.dumps(data), encoding="utf-8")
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert f"[hooks.state.'{hooks}:pre_tool_use:1:0']" in text
+    assert f"[hooks.state.'{hooks}:pre_tool_use:0:0']" not in text
 
 
 def test_apply_codex_grants_trust(tmp_path, monkeypatch):
