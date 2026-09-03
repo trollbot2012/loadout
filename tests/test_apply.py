@@ -422,3 +422,51 @@ def test_trust_codex_gate_ignores_comments_and_never_duplicates_a_key(tmp_path):
     assert text.rstrip().endswith("[other]\nk = 1") or "[other]\nk = 1" in text
     section = text.split(f"[hooks.state.'{key}']\n")[-1]
     assert section.startswith("trusted_hash = \"sha256:")
+
+
+def test_trust_codex_gate_drops_its_own_stale_entries_when_the_gate_moves(tmp_path):
+    """Regression: trust keys are positional (<event>:<group>:<handler>), but the gate is re-found by
+    its "gate.py" command. When another hook is added ahead of it the gate moves, and the entry left at
+    the old index silently squats a foreign handler -- reporting our hash for their command, which Codex
+    then reads as "modified since last trusted" and refuses to run. Observed live on 2026-09-02: the
+    gate's hash sat on `pre_tool_use:0:0` (devteam-codex) and `stop:0:0` (an ADE notify hook)."""
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    first = cfg.read_text(encoding="utf-8")
+    gate_pre = f"[hooks.state.'{hooks}:pre_tool_use:0:0']"
+    gate_stop = f"[hooks.state.'{hooks}:stop:0:0']"
+    assert gate_pre in first and gate_stop in first
+
+    # a foreign hook is added ahead of ours in both events: the gate shifts to index 1
+    foreign = {"hooks": [{"type": "command", "command": "devteam-codex hook", "timeout": 10}]}
+    data = json.loads(hooks.read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "Stop"):
+        data["hooks"][event].insert(0, json.loads(json.dumps(foreign)))
+    hooks.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert f"[hooks.state.'{hooks}:pre_tool_use:1:0']" in text, "the gate is trusted at its new index"
+    assert f"[hooks.state.'{hooks}:stop:1:0']" in text
+    assert gate_pre not in text, "our stale entry must not be left squatting the foreign handler"
+    assert gate_stop not in text
+    assert text.count("trusted_hash") == 2
+
+
+def test_trust_codex_gate_prunes_its_entries_when_the_gate_is_gone(tmp_path):
+    """Removing the gate from hooks.json must take its trust entries with it, so a later hook that
+    lands on the freed index is not pre-judged against our hash. Foreign entries are never touched."""
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    keep = "[hooks.state.'D:/other/hooks.json:stop:0:0']\ntrusted_hash = \"sha256:keep\"\n"
+    cfg.write_text(keep, encoding="utf-8")
+    apply.trust_codex_gate(hooks, cfg)
+    assert cfg.read_text(encoding="utf-8").count("trusted_hash") == 3
+
+    hooks.write_text(json.dumps({"hooks": {}}, indent=2), encoding="utf-8")
+    apply.trust_codex_gate(hooks, cfg)
+    text = cfg.read_text(encoding="utf-8")
+    assert "sha256:keep" in text, "another file's entry is not ours to remove"
+    assert f"{hooks}:pre_tool_use" not in text and f"{hooks}:stop" not in text
+    assert text.count("trusted_hash") == 1

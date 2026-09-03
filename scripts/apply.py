@@ -187,6 +187,42 @@ def codex_hook_hash(event, group, handler, windows=None):
     return "sha256:" + hashlib.sha256(blob).hexdigest()
 
 
+def _codex_gate_digests():
+    """Every trusted_hash this writer could ever have produced for a gate handler: both events, both
+    command forms (Codex hashes commandWindows on Windows, command elsewhere) and the legacy
+    snake_case command_windows an older version wrote. A stored hash in this set was written by us."""
+    digests = set()
+    for json_key, groups in codex_gate_hooks().items():
+        label = _CODEX_EVENT_LABEL[json_key]
+        for group in groups:
+            for handler in group["hooks"]:
+                legacy = {("command_windows" if k == "commandWindows" else k): v for k, v in handler.items()}
+                for shape in (handler, legacy):
+                    for windows in (True, False):
+                        digests.add(codex_hook_hash(label, group, shape, windows))
+    return digests
+
+
+def _drop_stale_gate_trust(text, hooks_path, wanted):
+    """Remove [hooks.state] entries for `hooks_path` that we wrote for the gate but that no longer
+    describe it. Trust keys are positional (<event>:<group>:<handler>) while the gate is re-found by
+    its command, so a hook inserted ahead of ours shifts the gate and strands our entry on someone
+    else's handler -- which Codex reads as "modified since last trusted" and then refuses to run it.
+    Only entries whose stored hash is one of ours are touched; anything else is left exactly as is.
+    Returns (text, dropped_any)."""
+    ours = _codex_gate_digests()
+    pattern = re.compile(
+        r"^\[hooks\.state\.'(" + re.escape(str(hooks_path)) + r":[^']*)'\][ \t]*\r?\n"
+        r"trusted_hash = \"(sha256:[0-9a-f]+)\"[ \t]*(?:\r?\n)?(?:[ \t]*\r?\n)?", re.M)
+
+    def drop(m):
+        key, digest = m.group(1), m.group(2)
+        return "" if digest in ours and key not in wanted else m.group(0)
+
+    new = pattern.sub(drop, text)
+    return new, new != text
+
+
 def trust_codex_gate(hooks_path=None, config_path=None):
     """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
     The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
@@ -203,7 +239,7 @@ def trust_codex_gate(hooks_path=None, config_path=None):
                     wanted[f"{hooks_path}:{label}:{gi}:{hi}"] = codex_hook_hash(label, group, handler)
     text = config_path.read_text(encoding="utf-8") if config_path.is_file() else "[hooks.state]\n"
     nl = "\r\n" if "\r\n" in text else "\n"
-    changed = False
+    text, changed = _drop_stale_gate_trust(text, hooks_path, wanted)
     for key, digest in wanted.items():
         header = f"[hooks.state.'{key}']"
         # the header at line start, then every following non-blank line that is not a table header:
