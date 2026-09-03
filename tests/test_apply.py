@@ -26,6 +26,14 @@ def codex_hooks(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def dsh_patch(tmp_path, monkeypatch):
+    """Never touch the real ~/.dsh/cordis.patch.yml from tests."""
+    path = tmp_path / "dsh-home" / "cordis.patch.yml"
+    monkeypatch.setattr(apply, "DSH_PATCH", path, raising=False)
+    return path
+
+
 def test_fresh_claude_activation(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     res = apply.apply(tmp_path, "claude-code")
@@ -425,6 +433,93 @@ def test_trust_codex_gate_ignores_comments_and_never_duplicates_a_key(tmp_path):
     assert section.startswith("trusted_hash = \"sha256:")
 
 
+# ---------------------------------------------------------------- DeepSeek Harness (user-level cordis.patch.yml)
+
+DSH_NOTE = " (dsh loads the plugin at the next session"
+
+
+def dsh_text(path):
+    return path.read_text(encoding="utf-8")
+
+
+def test_dsh_entry_name_is_a_file_url():
+    entry = apply.dsh_entry()
+    assert entry.endswith("\n") and "\r" not in entry
+    assert entry.startswith("- insert:\n    - id: loadout-gate\n      name: file:///")
+    name = entry.rstrip("\n").rsplit("name: ", 1)[1]
+    assert name.startswith("file:///") and "\\" not in name and name.endswith("/scripts/gate_dsh.mjs")
+    assert apply.dsh_entry(Path("C:/x/y/gate_dsh.mjs")).rstrip("\n").endswith("name: file:///C:/x/y/gate_dsh.mjs")
+
+
+def test_dsh_patch_created_when_absent(dsh_patch):
+    assert not dsh_patch.exists()
+    assert apply.register_dsh_gate(dsh_patch) == "created"
+    text = dsh_text(dsh_patch)
+    assert text.startswith("#") and "\r\n" not in text
+    assert text.endswith(apply.dsh_entry())
+    assert text.count("- insert:") == 1
+
+
+def test_dsh_empty_array_is_replaced_and_comments_kept(dsh_patch):
+    dsh_patch.parent.mkdir(parents=True)
+    dsh_patch.write_bytes(b"# cordis loader patches\n# edit freely\n[]\n")
+    assert apply.register_dsh_gate(dsh_patch) == "updated"
+    text = dsh_text(dsh_patch)
+    assert "[]" not in text
+    assert text == "# cordis loader patches\n# edit freely\n" + apply.dsh_entry()
+
+
+def test_dsh_foreign_entry_survives_and_ours_is_appended(dsh_patch):
+    dsh_patch.parent.mkdir(parents=True)
+    other = "# top\n- insert:\n    - id: other-plugin\n      name: file:///C:/x/other.mjs\n"
+    dsh_patch.write_bytes(other.encode("utf-8"))
+    assert apply.register_dsh_gate(dsh_patch) == "updated"
+    text = dsh_text(dsh_patch)
+    assert text.startswith(other), "foreign entry and comments preserved byte for byte"
+    assert text.endswith(apply.dsh_entry())
+    assert text.count("- insert:") == 2
+
+
+def test_dsh_stale_entry_is_replaced_in_place_not_duplicated(dsh_patch):
+    dsh_patch.parent.mkdir(parents=True)
+    stale = ("# head\r\n- insert:\r\n    - id: loadout-gate\r\n      name: file:///C:/old/scripts/gate_dsh.mjs\r\n"
+             "- insert:\r\n    - id: zzz\r\n      name: file:///C:/x/zzz.mjs\r\n")
+    dsh_patch.write_bytes(stale.encode("utf-8"))
+    assert apply.register_dsh_gate(dsh_patch) == "updated"
+    raw = dsh_patch.read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), "CRLF preserved"
+    text = raw.decode("utf-8").replace("\r\n", "\n")
+    assert text == ("# head\n" + apply.dsh_entry()
+                    + "- insert:\n    - id: zzz\n      name: file:///C:/x/zzz.mjs\n")
+    assert "C:/old/scripts" not in text and text.count("loadout-gate") == 1
+
+
+def test_dsh_rerun_is_unchanged_and_byte_identical(dsh_patch):
+    assert apply.register_dsh_gate(dsh_patch) == "created"
+    first = dsh_patch.read_bytes()
+    assert apply.register_dsh_gate(dsh_patch) == "unchanged"
+    assert dsh_patch.read_bytes() == first
+
+
+def test_dsh_host_writes_agents_md_and_registers(tmp_path, dsh_patch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "deepseek")
+    assert set(res) == {"AGENTS.md", "~/.dsh/cordis.patch.yml"}
+    assert res["AGENTS.md"] == "created"
+    assert res["~/.dsh/cordis.patch.yml"].startswith("created" + DSH_NOTE)
+    assert "no per-repo config" in res["~/.dsh/cordis.patch.yml"]
+    assert "## Loadout" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert dsh_patch.is_file()
+    assert not (tmp_path / ".claude").exists() and not (tmp_path / "CLAUDE.md").exists()
+    assert apply.apply(tmp_path, "dsh")["~/.dsh/cordis.patch.yml"].startswith("unchanged" + DSH_NOTE)
+
+
+def test_dsh_no_enforce_and_other_hosts_skip_registration(tmp_path, dsh_patch, codex_hooks):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek", enforce=False)
+    assert not dsh_patch.exists()
+    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "codex")
+    assert not dsh_patch.exists()
 def test_trust_codex_gate_drops_its_own_stale_entries_when_the_gate_moves(tmp_path):
     """Regression: trust keys are positional (<event>:<group>:<handler>), but the gate is re-found by
     its "gate.py" command. When another hook is added ahead of it the gate moves, and the entry left at

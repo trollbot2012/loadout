@@ -28,11 +28,13 @@ import apply  # same directory; owns the Accepted-line grammar and the CLI flag 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree", "apply_patch"}  # apply_patch: Codex
 PATCH_FILE_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)  # Move to: rename target
 CODEX_SURFACE = {"hooks.json", "config.toml"}  # operator-owned only under a .codex directory
+DSH_SURFACE = {"settings.yaml", "package.json"}  # operator-owned only under a .dsh directory
 DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
 MCP_MUTATING_RE = re.compile(
     r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
     re.I)
-SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py"}  # lower-cased
+SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py",
+                 "cordis.patch.yml", "cordis.yml", "gate_dsh.mjs"}  # lower-cased; the cordis files are dsh loader config
 COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 HATCH = "Operator hatch: LOADOUT_ENFORCE=0."
 STOP_BLOCK_CAP = 8  # own runaway guard; Claude Code applies the same cap on its side
@@ -51,14 +53,21 @@ _WRITE_WORDS = re.compile(r"(?:^|[|;&(\x27\"])\s*" + _PREFIX + r"(?:" + _WORDS +
 # the enforcement surface: naming it in a command is gated before stage 1, and writing it is denied always
 _SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md"
                         r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)"  # the .claude dir itself (rm -rf .claude)
-                        r"|\.codex[\\/](?:hooks\.json|config\.toml)", re.I)  # Codex hook registration + trust
+                        r"|\.codex[\\/](?:hooks\.json|config\.toml)"  # Codex hook registration + trust
+                        r"|cordis\.patch\.yml|cordis\.yml|gate_dsh\.mjs"  # dsh loader config + the plugin itself
+                        r"|\.dsh[\\/](?:settings\.yaml|profiles)", re.I)  # dsh settings + profile tree
 
 
 def is_surface(path):
-    """Operator-owned enforcement config: the Claude files anywhere, the Codex files under .codex."""
+    """Operator-owned enforcement config: the Claude and dsh loader files anywhere, plus the host
+    files that are only enforcement config inside their own home (.codex, .dsh)."""
     parts = re.split(r"[\\/]", str(path))
     name = parts[-1].lower()
-    return name in SURFACE_FILES or (name in CODEX_SURFACE and ".codex" in (p.lower() for p in parts[:-1]))
+    if name in SURFACE_FILES:
+        return True
+    parents = [p.lower() for p in parts[:-1]]
+    return ((name in CODEX_SURFACE and ".codex" in parents)
+            or (name in DSH_SURFACE and ".dsh" in parents))
 
 # cwd = where the session started (first transcript line); blocks = consecutive Stop blocks since the
 # last real skill invocation, read from the transcript itself so nothing persists across sessions
@@ -233,11 +242,19 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
+def dsh_facts(hook):
+    """DeepSeek Harness has no readable on-disk log (multi-frame zstd), so its in-process plugin
+    reports the events it saw on the payload itself."""
+    import gate_dsh  # same directory; imported lazily because it imports this module
+    return gate_dsh.facts_from_events(hook.get("events"), hook.get("cwd"))
+
+
 def resolve_host(tp, host=None):
-    """'codex' when told so or when the transcript is a Codex rollout, else 'claude-code'."""
-    if host == "codex":
-        return "codex"
-    if host is None and tp:
+    """The host we are gating: what we were told, else 'codex' when the transcript is a Codex
+    rollout, else Claude Code."""
+    if host:
+        return host
+    if tp:
         import gate_codex  # same directory; imported lazily because it imports this module
         if gate_codex.is_codex_transcript(tp):
             return "codex"
@@ -259,12 +276,28 @@ def decide(mode, hook, env=None, host=None):
     if env.get("LOADOUT_ENFORCE") == "0":
         return None
     tp = hook.get("transcript_path")
-    facts = ledger_facts(tp, host, hook.get("session_id"))
     tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
+    if host == "dsh":
+        import gate_dsh
+        facts = dsh_facts(hook)
+        tool, inp = gate_dsh.normalise(tool, inp)
+    else:
+        facts = ledger_facts(tp, host, hook.get("session_id"))
     target = _target_path(inp) if mode == "pre" else ""
     # the hook cwd follows `cd`; the edited path and the session's starting directory do not
-    loadout = find_loadout(hook.get("cwd"), Path(target).parent if target else None, facts.cwd)
+    # a relative target belongs to the session's directory, never to wherever this gate happens to run
+    target_dir = None
+    if target:
+        tp_ = Path(target)
+        if not tp_.is_absolute() and hook.get("cwd"):
+            tp_ = Path(hook["cwd"]) / tp_
+        target_dir = tp_.parent
+    loadout = find_loadout(hook.get("cwd"), target_dir, facts.cwd)
     if not loadout:
+        # A host that told us a loadout governs this session, reporting none now, means the file was
+        # removed mid-session. On a fail-closed host that is a bypass attempt, not a release.
+        if hook.get("loadout_expected") and host in FAIL_CLOSED_HOSTS:
+            return fault_output(mode)
         return None
     try:
         stages = binding_stages(loadout.read_text(encoding="utf-8", errors="replace"))
@@ -306,21 +339,38 @@ def decide(mode, hook, env=None, host=None):
         if not missing:
             return None
         if facts.blocks >= STOP_BLOCK_CAP:
-            if resolve_host(tp, host) == "codex":
-                # Codex has no host-side release. Disablement is external-only by contract, so the gate
-                # keeps blocking; the operator ends the loop (LOADOUT_ENFORCE=0, interrupt, or remove
-                # LOADOUT.md). The note makes a runaway visible in hook output.
-                sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; "
-                                 "still blocking (no cap on Codex; operator hatch LOADOUT_ENFORCE=0).\n")
-            else:
+            if resolve_host(tp, host) == "claude-code":
                 # Claude Code overrides a Stop hook itself after 8 consecutive blocks; yielding here only
                 # mirrors that host limit instead of fighting it
                 sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (host cap).\n")
                 return None
+            # every other host: no host-side release, and disablement is external-only by contract, so
+            # the gate keeps blocking and the operator ends the loop (LOADOUT_ENFORCE=0, interrupt, or
+            # remove LOADOUT.md). The note makes a runaway visible wherever hook output is surfaced.
+            sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; "
+                             f"still blocking (no host cap on {resolve_host(tp, host)}; "
+                             "operator hatch LOADOUT_ENFORCE=0).\n")
         return {"decision": "block",
                 "reason": "Loadout gate: stages not run this session: "
                           + ", ".join(f"{s} (`{k}`)" for s, k in missing)
                           + f". Invoke them, then stop. {HATCH}"}
+    return None
+
+
+# Hosts where this gate, not the harness, is what holds the line. Everywhere else the host itself
+# enforces a denied tool call and a blocked stop, so a broken gate can safely allow and let the
+# harness carry on; here allowing would be a silent bypass, so an internal fault denies instead.
+FAIL_CLOSED_HOSTS = {"dsh"}
+_FAULT = ("Loadout gate: the gate hit an internal error, so this is denied rather than allowed "
+          "(fail closed). Operator hatch: LOADOUT_ENFORCE=0.")
+
+
+def fault_output(mode):
+    """What a fault must produce on a fail-closed host: a deny for a tool call, a block for a stop."""
+    if mode == "pre":
+        return _deny(_FAULT)
+    if mode == "stop":
+        return {"decision": "block", "reason": _FAULT}
     return None
 
 
@@ -330,10 +380,12 @@ def main():
     host = argv[argv.index("--host") + 1] if "--host" in argv and argv.index("--host") + 1 < len(argv) else None
     try:
         out = decide(mode, json.load(sys.stdin), host=host)
-    except Exception:  # deliberate: a broken gate must allow, never wedge the harness; but say so
-        sys.stderr.write("loadout gate: failed open (allowing) because of an internal error:\n")
+    except Exception:  # deliberate: never raise and never exit non-zero, whatever the host
+        closed = host in FAIL_CLOSED_HOSTS
+        sys.stderr.write("loadout gate: internal error; "
+                         + ("denying (fail closed)" if closed else "allowing (the host still enforces)") + ":\n")
         traceback.print_exc(file=sys.stderr)
-        out = None
+        out = fault_output(mode) if closed else None
     if out:
         sys.stdout.write(json.dumps(out))
     sys.exit(0)

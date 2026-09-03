@@ -12,11 +12,14 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
     .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
   - on codex, ONLY with --enforce-codex, the same gate in the user-level ~/.codex/hooks.json
-    ($CODEX_HOME honoured). Off by default: on Codex 0.152.1 a registered gate crashed the
-    desktop app's app-server (hard abort ~20s after launch, no respawn, every request then
-    failing with "Codex app-server process is not available"), and a schema-correct nested
-    entry did it as readily as the malformed root-level one an older version wrote. Without
-    the flag --host codex wires the prose section only.
+    ($CODEX_HOME honoured). Off by default as caution: Codex 0.152.1 aborted (0xc0000409) while a
+    gate was registered. A later minidump investigation found no trace of the gate in any dump, and
+    upstream reports the same fault with an empty CODEX_HOME and no hooks, so the gate is not the
+    known cause — see the crash investigation in docs/host-capability-matrix.md. Without the flag
+    --host codex wires the prose section only.
+  - on deepseek/dsh, the gate as a loader patch entry in the user-level $DSH_HOME/cordis.patch.yml
+    (default ~/.dsh): dsh has no per-repo plugin config, and that patch layer is applied after every
+    profile's own, so the one entry covers headless, tui and web alike.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -28,9 +31,11 @@ from pathlib import Path
 
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 GATE = Path(__file__).resolve().parent / "gate.py"
+DSH_PLUGIN = Path(__file__).resolve().parent / "gate_dsh.mjs"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
 CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
+DSH_PATCH = Path(os.environ.get("DSH_HOME") or "~/.dsh").expanduser() / "cordis.patch.yml"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
@@ -266,6 +271,67 @@ def trust_codex_gate(hooks_path=None, config_path=None):
     return "trusted"
 
 
+# dsh registration is user-level: there is no per-repo plugin config, and the loader applies
+# cordis.patch.yml after every profile's own patch layer, so one entry covers every profile. The
+# stdlib has no YAML writer, so the file is edited line by line exactly like config.toml above:
+# only our own entry is replaced or appended; every other entry and comment keeps its bytes and order.
+DSH_HEADER = "# dsh loader patches, applied after every profile's own patch layer (written by loadout apply).\n"
+_DSH_TOP = re.compile(r"-[ \t]")
+
+
+def _dsh_meaningful(line):
+    return bool(line.strip()) and not line.lstrip().startswith("#")
+
+
+def _dsh_append(lines, entry):
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines + entry + [""]
+
+
+def dsh_entry(plugin=None):
+    """The loader patch entry that loads our gate. `name` must be a file:// URL: Node ESM rejects a
+    bare Windows path with ERR_UNSUPPORTED_ESM_URL_SCHEME. lstrip keeps POSIX at three slashes too."""
+    url = "file:///" + str(Path(plugin or DSH_PLUGIN)).replace("\\", "/").lstrip("/")
+    return "- insert:\n    - id: loadout-gate\n      name: " + url + "\n"
+
+
+def register_dsh_gate(path=None, plugin=None):
+    """Upsert our entry into the user-level $DSH_HOME/cordis.patch.yml. Returns the action."""
+    path = Path(path or DSH_PATCH)
+    entry = dsh_entry(plugin).rstrip("\n").split("\n")
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_lf(path, DSH_HEADER + "\n".join(entry) + "\n")
+        return "created"
+    with path.open(encoding="utf-8", newline="") as f:  # newline="" so CRLF survives to be detected
+        raw = f.read()
+    nl = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.replace("\r\n", "\n").split("\n")
+    starts = [i for i, line in enumerate(lines) if _DSH_TOP.match(line)]
+    if starts:
+        for start, stop in zip(starts, starts[1:] + [len(lines)]):
+            while stop > start + 1 and not _dsh_meaningful(lines[stop - 1]):
+                stop -= 1  # trailing blank and comment lines belong to the file, not to the entry
+            if any("gate_dsh.mjs" in line for line in lines[start:stop]):
+                if lines[start:stop] == entry:
+                    return "unchanged"
+                lines[start:stop] = entry
+                break
+        else:
+            lines = _dsh_append(lines, entry)
+    else:
+        # a fresh profile file is a comment block followed by an empty array
+        meaningful = [i for i, line in enumerate(lines) if _dsh_meaningful(line)]
+        if len(meaningful) == 1 and lines[meaningful[0]].strip() == "[]":
+            lines[meaningful[0]:meaningful[0] + 1] = entry
+        else:
+            lines = _dsh_append(lines, entry)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write(nl.join(lines))
+    return "updated"
+
+
 def parse_accepted(text):
     m = ACCEPTED_RE.search(text)
     if not m:
@@ -334,9 +400,11 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
     gate = enforce and host == "claude-code"
-    # opt-in: registering the gate in ~/.codex/hooks.json crashed the Codex desktop app-server
-    # (0.152.1) ~20s after every launch, with a schema-correct entry as much as a malformed one
+    # codex is opt-in as caution, not as a verdict: Codex 0.152.1 aborted while a gate was
+    # registered, but the dumps carry no trace of the gate and upstream sees the same fault with
+    # no hooks at all (docs/host-capability-matrix.md records the investigation)
     codex = enforce and enforce_codex and host == "codex"
+    dsh = enforce and host in ("deepseek", "dsh")
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
@@ -358,6 +426,10 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
         results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
                                           + " in config.toml (Codex loads hooks at the next session)")
+    if dsh:
+        results["~/.dsh/cordis.patch.yml"] = register_dsh_gate() + (
+            " (dsh loads the plugin at the next session; there is no per-repo config,"
+            " so this registration covers every profile)")
     return results
 
 
