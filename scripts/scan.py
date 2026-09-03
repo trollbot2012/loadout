@@ -21,7 +21,8 @@ MAX_DESC = 400      # chars of description kept (trigger text usually sits past 
 MAX_LIST = 200
 MAX_HEAD = 16384    # bytes of SKILL.md read for frontmatter
 SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py", "scripts/gate.py",
-               "scripts/gate_codex.py", "scripts/gate_dsh.py", "scripts/gate_dsh.mjs"]
+               "scripts/gate_codex.py", "scripts/gate_dsh.py", "scripts/gate_dsh.mjs", "scripts/check_notes.py",
+               "references/skill-notes.md"]
 
 
 def _root(env_var, default):
@@ -521,9 +522,9 @@ def self_install(hosts_arg, check_only):
         if not state and dest.is_dir():
             print(f"- {host}: up to date ({dest})")
             continue
-        (dest / "scripts").mkdir(parents=True, exist_ok=True)
         for rel in SKILL_FILES:
             if (src / rel).is_file():
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src / rel, dest / rel)
         print(f"- {host}: {'updated' if dest.is_dir() and state else 'installed'} -> {dest}")
     return 1 if (check_only and stale) else 0
