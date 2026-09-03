@@ -6,7 +6,12 @@ enforcement**: config compatibility (a host reading Claude-format hooks) is not 
 
 Proof status values: `proven` (headless live run in that host: an edit denied before stage 1 and
 a stop blocked with stages missing, transcript inspected), `unverified` (mechanism documented,
-no live run), `not started`, `n/a` (no mechanism).
+no live run), `runtime proof blocked` (mechanism read from source, but a live run is currently
+impossible for an environmental reason named in the row), `not started`, `n/a` (no mechanism).
+
+A host is never called equivalent to Claude Code on the strength of a mechanism reading alone.
+Where the host does not itself enforce the block, equivalence additionally requires showing that
+an adapter failure fails **closed**, or an explicit decision to accept the weaker behaviour.
 
 | Host | Pre-tool deny | Stop block | Ledger source | Proof status |
 |---|---|---|---|---|
@@ -23,7 +28,7 @@ no live run), `not started`, `n/a` (no mechanism).
 | Grok Build | hard (fail-open on timeout) | none (Stop passive) | `updates.jsonl` | **unverified** (reads `.claude/settings.json`; not proven live) |
 | Crush | hard (PreToolUse only, exit 49 halts) | none | SQLite | not started |
 | Continue CLI | hard (undocumented) | undocumented | `~/.continue/sessions/*.json` | not started |
-| DeepSeek Harness | hard (`tools/pre-execute` waterfall returns `{kind:'deny',reason}`) | forced continuation via `agent.steer()`; no typed veto, no host cap | native `skill` tool + `tool/call` rows; on-disk log is multi-frame zstd | **unverified** (mechanism read from the installed 0.1.1-rc.2 source, no live run yet; adapter in progress) |
+| DeepSeek Harness | hard (`tools/pre-execute` waterfall returns `{kind:'deny',reason}`) | **not established**: no typed veto; the plugin forces continuation via `agent.steer()`, so an adapter failure fails open | native `skill` tool + `tool/call` rows; on-disk log is multi-frame zstd | **runtime proof blocked** (no reachable model backend on this machine; implementation stopped 2026-09-03) |
 
 ## Per-host detail
 
@@ -86,7 +91,8 @@ no live run), `not started`, `n/a` (no mechanism).
 
 ### DeepSeek Harness (verified from source 2026-09-03, dsh 0.1.1-rc.2)
 
-Read from the installed tree, not from docs: `%LOCALAPPDATA%\Programs\DeepSeek Harnessesourcespp
+Read from the installed tree, not from docs: `%LOCALAPPDATA%\Programs\DeepSeek Harness
+esourcespp
 ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
 
 - **Pre-tool denial — meets the contract.** Event `tools/pre-execute`, waterfall mode
@@ -96,15 +102,18 @@ ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with si
   denial into a model-visible error result, text `Error: <reason>`
   (`dsh-tools/lib/types/index.js:870-889`). A second, non-vetoable path exists:
   `ctx.tools.guard(fn)`, synchronous, where returning a string denies (`:512-520`).
-- **Stop blocking — different mechanism, same effect, weaker failure mode.** `agent/turn-stopping`
+- **Stop blocking — equivalence NOT established.** `agent/turn-stopping`
   is serial and returns void (`dsh-tool-cordis/lib/index.js:3868-3872`): a listener cannot veto.
   It calls `agent.steer(message)` and the loop re-reads its inbox, so the turn does not close
   (`dsh-agent-loop/lib/index.js:564-571`). The reason reaches the model only as the text of that
   injected message, not as a typed field — the same way Codex renders a block as a `HookPrompt`.
   **No consecutive-block cap exists anywhere in the shipped tree**, which matches the external-only
-  disablement policy. The failure mode differs from Claude Code and Codex: there the host enforces
-  the block, so a broken gate still fails safe; here the plugin forces continuation itself, so a
-  plugin that errors lets the turn end. The adapter must guard that explicitly.
+  disablement policy. But the failure mode differs from Claude Code and Codex in a way that blocks
+  any equivalence claim: there the host enforces the block, so a broken gate still fails safe; here
+  the plugin forces continuation itself, so a plugin that throws, times out, or is skipped lets the
+  turn end silently. Calling this equivalent requires one of two things, neither of which has been
+  done: a demonstration that an induced adapter failure still fails closed, or an explicit decision
+  to accept the weaker behaviour on this host.
 - **Skill invocation — meets the contract, and is the strongest signal of any host.** A native
   model-facing `skill` tool takes `{name}` and resolves through the skills registry rather than the
   `read` tool (`dsh-tool-skill/lib/index.js:37-135`); roots are `<project>/.dsh/skills`,
@@ -136,7 +145,23 @@ ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with si
   waterfall, so a plugin can spawn and await the Python gate and return its decision. Note
   `ctx.subprocess` scrubs `DSH_*`/secret environment from children
   (`dsh-subprocess/lib/index.js:26-44, 52-85`).
-- **Headless proof path exists**: `dsh --profile headless "<task>"` answers one task and exits.
+- **Headless proof path exists but could not be exercised**: `dsh --profile headless "<task>"` answers
+  one task and exits. All three configured providers are local endpoints; on 2026-09-03 two
+  (`:18090`, `:8080`) were not listening and the third (`:18093`) accepted TCP but never answered
+  HTTP — `/v1/models` failed and a minimal completion hung for 91 s. No dsh task can complete, so
+  the live proof is blocked on infrastructure, not on the design.
+
+**Proven live on 2026-09-03, before the blocker (registration only):** a plain `.mjs` plugin loads
+into the headless profile through a `--patch` overlay naming it by `file://` URL, with no pnpm and
+no package.json; its `apply()` ran and `agent/pre-step` fired with real payloads. The settings file
+can also be redirected with `- id: settings
+  config: {path: <copy>}`, so an adapter never needs to
+modify the operator's own `settings.yaml`. Nothing was left registered: the profile's
+`cordis.patch.yml` is back to `[]` and the probe module was removed.
+
+**Status: implementation stopped.** Resume when a model backend answers; the remaining work is the
+plugin plus its Python side, and the equivalence question above must be settled before the row can
+claim more than `runtime proof blocked`.
 
 ## Adapter checklist (per host)
 
