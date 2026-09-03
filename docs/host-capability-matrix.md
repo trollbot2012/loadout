@@ -11,7 +11,7 @@ no live run), `not started`, `n/a` (no mechanism).
 | Host | Pre-tool deny | Stop block | Ledger source | Proof status |
 |---|---|---|---|---|
 | Claude Code | hard | hard (host cap 8) | `transcript_path` JSONL | **proven** 2026-09-02 (gate.py v1.4.0) |
-| Codex CLI | hard | hard (no host cap; gate never yields, operator ends it) | rollout JSONL via `transcript_path` (pre) / session id (stop) | **proven** 2026-09-02 (gate_codex, v1.5.0) |
+| Codex CLI | hard | hard (no host cap; gate never yields, operator ends it) | rollout JSONL via `transcript_path` (pre) / session id (stop) | **opt-in only** (`--enforce-codex`): mechanism proven 2026-09-02 (gate_codex, v1.5.0), but registering it crashed the Codex 0.152.1 desktop app-server — see README |
 | Qwen Code | hard | hard | `transcript_path` JSONL | not started |
 | Gemini CLI | hard | hard (re-prompt) | `transcript_path` | not started |
 | Copilot CLI | hard (timeout fails open) | hard (cap 8) | `session-state/<id>/events.jsonl` (schema undocumented) | not started |

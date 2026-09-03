@@ -11,8 +11,12 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - any other native file that already exists in the project (keeps every harness consistent).
   - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
     .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
-  - on codex, the same gate in the user-level ~/.codex/hooks.json ($CODEX_HOME honoured):
-    project-level Codex hooks need a trusted project, and the gate is a no-op without LOADOUT.md.
+  - on codex, ONLY with --enforce-codex, the same gate in the user-level ~/.codex/hooks.json
+    ($CODEX_HOME honoured). Off by default: on Codex 0.152.1 a registered gate crashed the
+    desktop app's app-server (hard abort ~20s after launch, no respawn, every request then
+    failing with "Codex app-server process is not available"), and a schema-correct nested
+    entry did it as readily as the malformed root-level one an older version wrote. Without
+    the flag --host codex wires the prose section only.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -322,7 +326,7 @@ def upsert(path, blk, create_with=None):
     return action
 
 
-def apply(project, host, loadout="LOADOUT.md", enforce=True):
+def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False):
     project = Path(project)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
     accepted = parse_accepted(text)
@@ -330,7 +334,9 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
     gate = enforce and host == "claude-code"
-    codex = enforce and host == "codex"
+    # opt-in: registering the gate in ~/.codex/hooks.json crashed the Codex desktop app-server
+    # (0.152.1) ~20s after every launch, with a schema-correct entry as much as a malformed one
+    codex = enforce and enforce_codex and host == "codex"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
@@ -363,12 +369,13 @@ def main():
     host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
     loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
     enforce = "--no-enforce" not in argv
+    enforce_codex = "--enforce-codex" in argv
     args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     try:
-        results = apply(args[0], host, loadout, enforce)
+        results = apply(args[0], host, loadout, enforce, enforce_codex)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
