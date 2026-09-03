@@ -285,8 +285,19 @@ def decide(mode, hook, env=None, host=None):
         facts = ledger_facts(tp, host, hook.get("session_id"))
     target = _target_path(inp) if mode == "pre" else ""
     # the hook cwd follows `cd`; the edited path and the session's starting directory do not
-    loadout = find_loadout(hook.get("cwd"), Path(target).parent if target else None, facts.cwd)
+    # a relative target belongs to the session's directory, never to wherever this gate happens to run
+    target_dir = None
+    if target:
+        tp_ = Path(target)
+        if not tp_.is_absolute() and hook.get("cwd"):
+            tp_ = Path(hook["cwd"]) / tp_
+        target_dir = tp_.parent
+    loadout = find_loadout(hook.get("cwd"), target_dir, facts.cwd)
     if not loadout:
+        # A host that told us a loadout governs this session, reporting none now, means the file was
+        # removed mid-session. On a fail-closed host that is a bypass attempt, not a release.
+        if hook.get("loadout_expected") and host in FAIL_CLOSED_HOSTS:
+            return fault_output(mode)
         return None
     try:
         stages = binding_stages(loadout.read_text(encoding="utf-8", errors="replace"))
@@ -346,16 +357,35 @@ def decide(mode, hook, env=None, host=None):
     return None
 
 
+# Hosts where this gate, not the harness, is what holds the line. Everywhere else the host itself
+# enforces a denied tool call and a blocked stop, so a broken gate can safely allow and let the
+# harness carry on; here allowing would be a silent bypass, so an internal fault denies instead.
+FAIL_CLOSED_HOSTS = {"dsh"}
+_FAULT = ("Loadout gate: the gate hit an internal error, so this is denied rather than allowed "
+          "(fail closed). Operator hatch: LOADOUT_ENFORCE=0.")
+
+
+def fault_output(mode):
+    """What a fault must produce on a fail-closed host: a deny for a tool call, a block for a stop."""
+    if mode == "pre":
+        return _deny(_FAULT)
+    if mode == "stop":
+        return {"decision": "block", "reason": _FAULT}
+    return None
+
+
 def main():
     argv = sys.argv[1:]
     mode = argv[0] if argv else ""
     host = argv[argv.index("--host") + 1] if "--host" in argv and argv.index("--host") + 1 < len(argv) else None
     try:
         out = decide(mode, json.load(sys.stdin), host=host)
-    except Exception:  # deliberate: a broken gate must allow, never wedge the harness; but say so
-        sys.stderr.write("loadout gate: failed open (allowing) because of an internal error:\n")
+    except Exception:  # deliberate: never raise and never exit non-zero, whatever the host
+        closed = host in FAIL_CLOSED_HOSTS
+        sys.stderr.write("loadout gate: internal error; "
+                         + ("denying (fail closed)" if closed else "allowing (the host still enforces)") + ":\n")
         traceback.print_exc(file=sys.stderr)
-        out = None
+        out = fault_output(mode) if closed else None
     if out:
         sys.stdout.write(json.dumps(out))
     sys.exit(0)

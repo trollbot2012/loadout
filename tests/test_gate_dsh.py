@@ -135,3 +135,66 @@ def test_operator_hatch_still_disables_everything(tmp_path):
                        input=json.dumps(hook(proj, [], tool_name="write", tool_input={"file_path": "a.py"})),
                        capture_output=True, encoding="utf-8", env=e)
     assert r.returncode == 0 and r.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------- fail closed
+
+def test_an_internal_gate_error_fails_closed_on_dsh(monkeypatch, capsys, tmp_path):
+    """dsh does not enforce the block itself, so a fault in the gate must still deny and still
+    block. gate.py's default is to allow on error (never wedge a host that enforces for us); on
+    dsh that default is inverted, or a crashing gate would be a silent bypass."""
+    proj = project(tmp_path)
+
+    def explode(*a, **k):
+        raise RuntimeError("induced fault")
+
+    monkeypatch.setattr(gate, "decide", explode)
+
+    for mode, check in (("pre", lambda o: o["hookSpecificOutput"]["permissionDecision"] == "deny"),
+                        ("stop", lambda o: o["decision"] == "block")):
+        monkeypatch.setattr(sys, "argv", ["gate.py", mode, "--host", "dsh"])
+        monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(hook(proj, []))))
+        try:
+            gate.main()
+        except SystemExit as e:
+            assert e.code == 0, "the gate must never exit non-zero"
+        out = capsys.readouterr().out
+        assert out.strip(), f"{mode}: an internal error produced no verdict, which reads as allow"
+        decision = json.loads(out)
+        assert check(decision), f"{mode}: {decision}"
+        assert "fail closed" in json.dumps(decision).lower()
+
+
+def test_other_hosts_still_fail_open_on_an_internal_error(monkeypatch, capsys, tmp_path):
+    """Claude Code and Codex enforce the block themselves, so a broken gate there must not wedge
+    the session: the harness is still holding the line."""
+    proj = project(tmp_path)
+    monkeypatch.setattr(gate, "decide", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("induced")))
+    monkeypatch.setattr(sys, "argv", ["gate.py", "stop", "--host", "codex"])
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(hook(proj, []))))
+    try:
+        gate.main()
+    except SystemExit as e:
+        assert e.code == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_a_non_dict_tool_input_does_not_crash_the_gate(tmp_path):
+    proj = project(tmp_path)
+    out = run_gate("pre", hook(proj, [], tool_name="write", tool_input="not-a-dict"))
+    assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_vanished_loadout_denies_instead_of_releasing(tmp_path):
+    """The plugin decides once, at load, whether a LOADOUT.md governs the session. If the file is
+    gone by the time a decision is made, that is a bypass attempt, not a release."""
+    proj = project(tmp_path)
+    (proj / "LOADOUT.md").unlink()
+    out = run_gate("pre", hook(proj, [], tool_name="write", tool_input={"file_path": "a.py"},
+                               loadout_expected=True))
+    assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "fail closed" in out["hookSpecificOutput"]["permissionDecisionReason"].lower()
+    out = run_gate("stop", hook(proj, [{"t": "tool", "name": "write", "file": "a.py"}], loadout_expected=True))
+    assert out and out["decision"] == "block"
+    # without that flag a project simply has no loadout, which is the normal unenforced case
+    assert run_gate("pre", hook(proj, [], tool_name="write", tool_input={"file_path": "a.py"})) is None
