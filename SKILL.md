@@ -4,7 +4,7 @@ description: Audit the current coding agent/harness (installed skills, plugins, 
 license: MIT
 compatibility: Requires Python 3.9+ (stdlib only) on Windows, macOS or Linux, and a harness that can run a shell command and read markdown.
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Loadout: Harness Audit → Workflow Recommendation
@@ -242,7 +242,11 @@ exits 1 when any copy is stale or missing.
   disk view may include skills not loaded in this session and vice versa. Prefer
   the in-session skill list for "what can I invoke right now", the scanner for
   "what is installed on this machine" and for the off/on markers.
-  The enforcement gate exists only for Claude Code in this version. Operator hatch:
+  The enforcement gate exists for Claude Code and Codex CLI in this version (Codex: user-level
+  `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next session; on Codex a
+  skill counts as invoked only when its SKILL.md is actually read, and there is no block cap, so a
+  stuck session is ended by the operator, not the gate; other hosts are prose only until
+  `docs/host-capability-matrix.md` says proven). Operator hatch:
   `LOADOUT_ENFORCE=0` or remove LOADOUT.md; there is no agent-side override, and
   writes to LOADOUT.md, AGENTS.md or CLAUDE.md are gated like any other edit (only an
   exact `apply.py` invocation passes as a re-bootstrap). Ceilings: Claude Code overrides

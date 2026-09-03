@@ -50,7 +50,7 @@ host's native instruction file (`CLAUDE.md` with an `@AGENTS.md` import, `GEMINI
 `QWEN.md`). Re-audits replace the section instead of adding another. The run ends by naming the
 first task and starting it, not by saving a file.
 
-## Enforcement (Claude Code)
+## Enforcement (Claude Code and Codex CLI)
 
 `apply.py --host claude-code` also registers `scripts/gate.py` as a PreToolUse and Stop hook
 in the project's `.claude/settings.local.json` (local: the command embeds this machine's
@@ -65,12 +65,19 @@ registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md
 `.claude/settings*.json`, gate.py, apply.py) is operator-owned: the agent cannot write to it
 at any stage, only the exact `apply.py` bootstrap invocation of this skill's own apply.py
 passes, and a re-audit that changes the accepted set runs under the hatch. Ceilings: the gate
-stops blocking after 8 consecutive Stop blocks with no skill invoked in between, counted from
-the session transcript itself (nothing on disk, so a fresh session inherits nothing; Claude Code
-has the same override); the shell write check is a heuristic that can misfire on an innocent
+yields after 8 consecutive Stop blocks with no skill invoked in between on Claude Code only,
+because that host overrides the hook itself at that point (the count comes from the transcript,
+nothing on disk, so a fresh session inherits nothing); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
-Other hosts keep prose wiring in this version.
+Codex CLI: `apply.py --host codex` registers the same gate in the user-level `~/.codex/hooks.json`
+and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads
+the rollout transcript, treats `apply_patch` as an edit, and counts a skill as invoked only when the
+agent actually reads its SKILL.md (a `$name` mention is intent, not invocation). Codex has no
+Stop-block cap of its own and the gate adds none: a session that will not run its stages keeps being
+blocked, and only the operator ends it (`LOADOUT_ENFORCE=0`, interrupt, or remove LOADOUT.md). That
+is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02. Cursor and Grok read Claude-format hooks but are unverified. Every
+other host keeps prose wiring; see `docs/host-capability-matrix.md`.
 
 Self-install, check and update from a source checkout:
 

@@ -25,7 +25,9 @@ from pathlib import Path
 
 import apply  # same directory; owns the Accepted-line grammar and the CLI flag set
 
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "EnterWorktree", "apply_patch"}  # apply_patch: Codex
+PATCH_FILE_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)  # Move to: rename target
+CODEX_SURFACE = {"hooks.json", "config.toml"}  # operator-owned only under a .codex directory
 DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
 MCP_MUTATING_RE = re.compile(
     r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
@@ -48,7 +50,15 @@ _WORDS = (r"tee|sed\s+(?:-\w*i\S*|--in-place\S*)|perl\s+-\S*[ip]\S*|mv|cp|instal
 _WRITE_WORDS = re.compile(r"(?:^|[|;&(\x27\"])\s*" + _PREFIX + r"(?:" + _WORDS + r")(?=\s|$|[\x27\"])", re.I)
 # the enforcement surface: naming it in a command is gated before stage 1, and writing it is denied always
 _SENSITIVE = re.compile(r"apply\.py|gate\.py|settings\.local\.json|settings\.json|LOADOUT\.md|AGENTS\.md|CLAUDE\.md"
-                        r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)", re.I)  # the .claude dir itself (rm -rf .claude)
+                        r"|(?<![\w.])\.claude(?=[\\/\s'\"]|$)"  # the .claude dir itself (rm -rf .claude)
+                        r"|\.codex[\\/](?:hooks\.json|config\.toml)", re.I)  # Codex hook registration + trust
+
+
+def is_surface(path):
+    """Operator-owned enforcement config: the Claude files anywhere, the Codex files under .codex."""
+    parts = re.split(r"[\\/]", str(path))
+    name = parts[-1].lower()
+    return name in SURFACE_FILES or (name in CODEX_SURFACE and ".codex" in (p.lower() for p in parts[:-1]))
 
 # cwd = where the session started (first transcript line); blocks = consecutive Stop blocks since the
 # last real skill invocation, read from the transcript itself so nothing persists across sessions
@@ -194,8 +204,19 @@ def bootstrap_invocation(cmd, cwd=None):
     return positional == 1
 
 
+def _target_paths(inp):
+    """Every file a tool call touches: one for the edit tools, each patched file for Codex's apply_patch
+    (whose tool_input.command is the patch text)."""
+    cmd = str(inp.get("command") or "")
+    if cmd.startswith("*** Begin Patch"):
+        return PATCH_FILE_RE.findall(cmd)
+    p = str(inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or "")
+    return [p] if p else []
+
+
 def _target_path(inp):
-    return str(inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or "")
+    paths = _target_paths(inp)
+    return paths[0] if paths else ""
 
 
 def _parent_transcript(tp):
@@ -212,13 +233,33 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def decide(mode, hook, env=None):
+def resolve_host(tp, host=None):
+    """'codex' when told so or when the transcript is a Codex rollout, else 'claude-code'."""
+    if host == "codex":
+        return "codex"
+    if host is None and tp:
+        import gate_codex  # same directory; imported lazily because it imports this module
+        if gate_codex.is_codex_transcript(tp):
+            return "codex"
+    return "claude-code"
+
+
+def ledger_facts(tp, host=None, session_id=None):
+    """Facts from the host's own transcript format. Codex's Stop payload carries no transcript_path,
+    only session_id, so the rollout is located by that id."""
+    if resolve_host(tp, host) == "codex":
+        import gate_codex
+        return gate_codex.transcript_facts(tp or gate_codex.find_rollout(session_id))
+    return transcript_facts(tp)
+
+
+def decide(mode, hook, env=None, host=None):
     """The hook decision dict, or None to allow."""
     env = os.environ if env is None else env
     if env.get("LOADOUT_ENFORCE") == "0":
         return None
     tp = hook.get("transcript_path")
-    facts = transcript_facts(tp)
+    facts = ledger_facts(tp, host, hook.get("session_id"))
     tool, inp = hook.get("tool_name"), hook.get("tool_input") or {}
     target = _target_path(inp) if mode == "pre" else ""
     # the hook cwd follows `cd`; the edited path and the session's starting directory do not
@@ -243,8 +284,9 @@ def decide(mode, hook, env=None):
             if not (write_shaped(cmd) or sensitive(cmd)):
                 return None
         elif is_edit_tool(tool):
-            if _basename(target).lower() in SURFACE_FILES:  # case-insensitive filesystems
-                return _deny(f"Loadout gate: `{_basename(target)}` is operator-owned enforcement config; "
+            hit = next((p for p in _target_paths(inp) if is_surface(p)), None)
+            if hit:  # case-insensitive filesystems; every file of a multi-file patch is checked
+                return _deny(f"Loadout gate: `{_basename(hit)}` is operator-owned enforcement config; "
                              f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")
         else:
             return None
@@ -253,7 +295,7 @@ def decide(mode, hook, env=None):
         if hook.get("agent_id"):  # a subagent is judged against its parent session too
             parent = _parent_transcript(tp)
             if parent:
-                invoked |= transcript_facts(parent).invoked
+                invoked |= ledger_facts(parent, host).invoked
         if skill in invoked:
             return None
         return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing. Details in LOADOUT.md. {HATCH}")
@@ -263,9 +305,18 @@ def decide(mode, hook, env=None):
         missing = [(s, k) for s, k in stages if k not in facts.invoked]
         if not missing:
             return None
-        if facts.blocks >= STOP_BLOCK_CAP:  # runaway guard, scoped to this transcript by construction
-            sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (cap).\n")
-            return None
+        if facts.blocks >= STOP_BLOCK_CAP:
+            if resolve_host(tp, host) == "codex":
+                # Codex has no host-side release. Disablement is external-only by contract, so the gate
+                # keeps blocking; the operator ends the loop (LOADOUT_ENFORCE=0, interrupt, or remove
+                # LOADOUT.md). The note makes a runaway visible in hook output.
+                sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; "
+                                 "still blocking (no cap on Codex; operator hatch LOADOUT_ENFORCE=0).\n")
+            else:
+                # Claude Code overrides a Stop hook itself after 8 consecutive blocks; yielding here only
+                # mirrors that host limit instead of fighting it
+                sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (host cap).\n")
+                return None
         return {"decision": "block",
                 "reason": "Loadout gate: stages not run this session: "
                           + ", ".join(f"{s} (`{k}`)" for s, k in missing)
@@ -274,9 +325,11 @@ def decide(mode, hook, env=None):
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    argv = sys.argv[1:]
+    mode = argv[0] if argv else ""
+    host = argv[argv.index("--host") + 1] if "--host" in argv and argv.index("--host") + 1 < len(argv) else None
     try:
-        out = decide(mode, json.load(sys.stdin))
+        out = decide(mode, json.load(sys.stdin), host=host)
     except Exception:  # deliberate: a broken gate must allow, never wedge the harness; but say so
         sys.stderr.write("loadout gate: failed open (allowing) because of an internal error:\n")
         traceback.print_exc(file=sys.stderr)

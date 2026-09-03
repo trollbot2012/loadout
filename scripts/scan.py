@@ -20,7 +20,8 @@ from pathlib import Path
 MAX_DESC = 400      # chars of description kept (trigger text usually sits past 160)
 MAX_LIST = 200
 MAX_HEAD = 16384    # bytes of SKILL.md read for frontmatter
-SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py", "scripts/gate.py"]
+SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py", "scripts/gate.py",
+               "scripts/gate_codex.py"]
 
 
 def _root(env_var, default):

@@ -14,6 +14,16 @@ import scan  # noqa: E402
 LOADOUT = ("# Loadout: x\nHarness: claude-code | Project type: cli\nDate: 2026-09-02\n\n"
            "## Recommended workflow\n1. plan → `planner` — why\n\n"
            "## Accepted\n- planning: `planner`\n- implementation: `tdd-skill`\n")
+CODEX_NOTE = "; trust granted in config.toml (Codex loads hooks at the next session"
+
+
+@pytest.fixture(autouse=True)
+def codex_hooks(tmp_path, monkeypatch):
+    """Never touch the real ~/.codex/hooks.json from tests."""
+    path = tmp_path / "codex-home" / "hooks.json"
+    monkeypatch.setattr(apply, "CODEX_HOOKS", path, raising=False)
+    monkeypatch.setattr(apply, "CODEX_CONFIG", tmp_path / "codex-home" / "config.toml", raising=False)
+    return path
 
 
 def test_fresh_claude_activation(tmp_path):
@@ -48,10 +58,10 @@ def test_reaudit_replaces_section_and_preserves_neighbours(tmp_path):
 def test_idempotent_rerun(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("# a\n", encoding="utf-8")
-    first = apply.apply(tmp_path, "codex")
+    first = apply.apply(tmp_path, "codex", enforce=False)
     assert first == {"AGENTS.md": "appended"}
     snapshot = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
-    assert apply.apply(tmp_path, "codex") == {"AGENTS.md": "replaced"}
+    assert apply.apply(tmp_path, "codex", enforce=False) == {"AGENTS.md": "replaced"}
     assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == snapshot
 
 
@@ -171,3 +181,139 @@ def test_register_gate_keeps_sibling_hooks_inside_the_same_entry(tmp_path):
     cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
     assert "other-stop" in cmds and "old/gate.py" not in json.dumps(data)
     assert sum("gate.py" in c for c in cmds) == 1
+
+
+# ---------------------------------------------------------------- Codex CLI (user-level hooks.json)
+
+def gate_cmds(data, event):
+    return [(h["command"], h["command_windows"]) for e in data[event] for h in e["hooks"] if "gate.py" in h["command"]]
+
+
+def test_codex_hooks_created_with_both_events_and_command_forms(codex_hooks):
+    assert apply.register_codex_gate(codex_hooks) == "created"
+    data = json.loads(codex_hooks.read_text(encoding="utf-8"))
+    assert set(data) == {"PreToolUse", "Stop"}
+    assert "matcher" not in data["PreToolUse"][0]
+    for event, mode in (("PreToolUse", "pre"), ("Stop", "stop")):
+        (posix, win), = gate_cmds(data, event)
+        assert posix == f'"{sys.executable}" "{apply.GATE}" {mode} --host codex'
+        assert win == "& " + posix
+        assert data[event][0]["hooks"][0]["timeout"] == 20
+    raw = codex_hooks.read_bytes()
+    assert raw.endswith(b"}\n") and b"\r\n" not in raw
+    assert apply.register_codex_gate(codex_hooks) == "unchanged"
+    assert len(json.loads(codex_hooks.read_text(encoding="utf-8"))["PreToolUse"]) == 1
+
+
+def test_codex_hooks_preserve_foreign_entries_and_replace_stale_gate(codex_hooks):
+    codex_hooks.parent.mkdir(parents=True)
+    existing = {
+        "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "post-bash"}]}],
+        "SessionStart": [{"hooks": [{"type": "command", "command": "session-a"}]},
+                         {"hooks": [{"type": "command", "command": "session-b"}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "foreign-stop"},
+                            {"type": "command", "command": 'python "old/gate.py" stop --host codex',
+                             "command_windows": '& python "old/gate.py" stop --host codex'}]}],
+        "PreToolUse": [{"hooks": [{"type": "command", "command": 'python "old/gate.py" pre --host codex'}]}],
+        "$schema": "x"}
+    codex_hooks.write_text(json.dumps(existing), encoding="utf-8")
+    assert apply.register_codex_gate(codex_hooks) == "updated"
+    data = json.loads(codex_hooks.read_text(encoding="utf-8"))
+    assert data["PostToolUse"] == existing["PostToolUse"]
+    assert data["SessionStart"] == existing["SessionStart"]
+    assert data["$schema"] == "x"
+    assert "old/gate.py" not in json.dumps(data)
+    stop_cmds = [h["command"] for e in data["Stop"] for h in e["hooks"]]
+    assert "foreign-stop" in stop_cmds
+    for event in ("PreToolUse", "Stop"):
+        assert len(gate_cmds(data, event)) == 1
+    assert len(data["PreToolUse"]) == 1
+
+
+def test_codex_invalid_hooks_json_is_an_error_before_any_write(tmp_path, codex_hooks):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    codex_hooks.parent.mkdir(parents=True)
+    codex_hooks.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="hooks.json"):
+        apply.apply(tmp_path, "codex")
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_codex_host_writes_agents_md_and_user_hooks(tmp_path, codex_hooks):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "codex")
+    assert res["AGENTS.md"] == "created" and set(res) == {"AGENTS.md", "~/.codex/hooks.json"}
+    assert res["~/.codex/hooks.json"].startswith("created" + CODEX_NOTE)
+    assert codex_hooks.is_file() and not (tmp_path / ".claude").exists()
+    assert apply.apply(tmp_path, "codex")["~/.codex/hooks.json"].startswith("unchanged; trust already present")
+    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False)
+    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "claude-code")
+
+
+# ---------------------------------------------------------------- codex hook trust
+
+RECORDED_TRIM_HOOK_HASH = "sha256:bf4e354026f5ca05bfdaabfe890dabeb551faa59c9e039ccfc62617bdec94b87"
+
+
+def test_codex_hook_hash_matches_a_recorded_trusted_hash():
+    # handler + hash copied verbatim from a real ~/.codex (hooks.json + config.toml [hooks.state]); Codex
+    # recorded it on Windows, so the commandWindows form is the one hashed. description is ignored.
+    group = {"matcher": "Bash", "hooks": [{
+        "type": "command", "timeout": 10,
+        "command": 'node "$HOME/.codex/hooks/trim-noisy-command-output.mjs"',
+        "commandWindows": r'"C:\Users\Waxilliam\AppData\Local\OpenAI\Codex\runtimes\cua_node\950613ca46815e82\bin\node.exe" "C:\Users\Waxilliam\.codex\hooks\trim-noisy-command-output.mjs"',
+        "description": "Compress noisy build-like command output before model context"}]}
+    assert apply.codex_hook_hash("post_tool_use", group, group["hooks"][0], windows=True) == RECORDED_TRIM_HOOK_HASH
+    assert apply.codex_hook_hash("post_tool_use", group, group["hooks"][0], windows=False) != RECORDED_TRIM_HOOK_HASH
+
+
+def test_trust_codex_gate_upserts_hooks_state_and_preserves_the_rest(tmp_path):
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    head = 'model = "x"\n\n[features]\nhooks = true\n\n[hooks.state]\n\n[hooks.state.\'C:\\other\\hooks.json:stop:0:0\']\ntrusted_hash = "sha256:keep"\n'
+    cfg.write_bytes(head.encode("utf-8"))
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert text.startswith(head), "existing lines are preserved byte for byte"
+    for event in ("pre_tool_use", "stop"):
+        assert f"[hooks.state.'{hooks}:{event}:0:0']" in text
+    assert text.count("trusted_hash") == 3
+    assert apply.trust_codex_gate(hooks, cfg) == "unchanged"
+    assert cfg.read_text(encoding="utf-8") == text
+    # a stale hash for our handler is replaced in place, not appended
+    import re
+    stale = re.sub(r"(pre_tool_use:0:0'\]\ntrusted_hash = )\"[^\"]+\"", r'\1"sha256:stale"', text)
+    assert "sha256:stale" in stale
+    cfg.write_bytes(stale.encode("utf-8"))
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    again = cfg.read_text(encoding="utf-8")
+    assert "sha256:stale" not in again and again.count("trusted_hash") == 3
+    # a missing config.toml is created with just the state table
+    fresh = tmp_path / "fresh.toml"
+    assert apply.trust_codex_gate(hooks, fresh) == "trusted"
+    assert fresh.read_text(encoding="utf-8").count("trusted_hash") == 2
+
+
+def test_apply_codex_grants_trust(tmp_path, monkeypatch):
+    monkeypatch.setattr(apply, "CODEX_CONFIG", tmp_path / "codex-home" / "config.toml")
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "codex")
+    assert "trust granted" in res["~/.codex/hooks.json"] and "skipped" not in res["~/.codex/hooks.json"]
+    assert (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8").count("trusted_hash") == 2
+
+
+def test_trust_codex_gate_ignores_comments_and_never_duplicates_a_key(tmp_path):
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    key = f"{hooks}:pre_tool_use:0:0"
+    # a commented-out header must not be treated as the section; a section with an extra line between
+    # header and hash must be replaced whole, never left with two trusted_hash keys (Codex would fail to parse)
+    cfg.write_bytes((f"# [hooks.state.'{key}']\n# trusted_hash = \"sha256:old\"\n\n[hooks.state.'{key}']\n"
+                     f"# note\ntrusted_hash = \"sha256:stale\"\n\n[other]\nk = 1\n").encode("utf-8"))
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert text.startswith(f"# [hooks.state.'{key}']\n# trusted_hash = \"sha256:old\"\n"), "comment lines untouched"
+    assert "sha256:stale" not in text and text.count("trusted_hash") == 3  # commented one + 2 real
+    assert text.rstrip().endswith("[other]\nk = 1") or "[other]\nk = 1" in text
+    section = text.split(f"[hooks.state.'{key}']\n")[-1]
+    assert section.startswith("trusted_hash = \"sha256:")

@@ -11,9 +11,13 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - any other native file that already exists in the project (keeps every harness consistent).
   - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
     .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
+  - on codex, the same gate in the user-level ~/.codex/hooks.json ($CODEX_HOME honoured):
+    project-level Codex hooks need a trusted project, and the gate is a no-op without LOADOUT.md.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,6 +26,7 @@ NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 GATE = Path(__file__).resolve().parent / "gate.py"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
+CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
@@ -37,8 +42,18 @@ def gate_hooks():
             "Stop": [{"hooks": [{"type": "command", "command": cmd("stop")}]}]}
 
 
+def codex_gate_hooks():
+    """Same gate for Codex CLI, in its Claude-shaped hooks.json. No PreToolUse matcher: Codex tool names
+    differ from Claude's, so the gate decides by name itself. Codex runs hooks through PowerShell on
+    Windows, where a quoted path at command position needs the call operator; bash takes the plain form."""
+    def entry(mode):
+        posix = f'"{sys.executable}" "{GATE}" {mode} --host codex'
+        return {"hooks": [{"type": "command", "command": posix, "command_windows": "& " + posix, "timeout": 20}]}
+    return {"PreToolUse": [entry("pre")], "Stop": [entry("stop")]}
+
+
 def load_settings(path):
-    """Parsed settings.local.json, or {} when absent. Validated up front so a bad file fails before any write."""
+    """Parsed hooks JSON, or {} when absent. Validated up front so a bad file fails before any write."""
     if not path.is_file():
         return {}
     try:
@@ -47,17 +62,14 @@ def load_settings(path):
         raise ValueError(f"{path} is not valid JSON; fix it or pass --no-enforce")
 
 
-def register_gate(project, data=None):
-    """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
-    path = Path(project) / SETTINGS_LOCAL
-    existed = path.is_file()
-    data = load_settings(path) if data is None else data
-    hooks = data.setdefault("hooks", {})
+def upsert_hooks(hooks, wanted):
+    """Replace our own gate hooks under each event in `hooks` (mutated) with `wanted`; every other hook
+    survives, including siblings inside the same entry. Returns whether anything changed."""
     changed = False
-    for event, entries in gate_hooks().items():
+    for event, entries in wanted.items():
         current = hooks.get(event, [])
         kept = []
-        for e in current:  # drop only our own hook commands; sibling hooks in the same entry survive
+        for e in current:
             inner = [h for h in e.get("hooks", []) if "gate.py" not in h.get("command", "")]
             if inner:
                 kept.append({**e, "hooks": inner} if len(inner) != len(e.get("hooks", [])) else e)
@@ -65,11 +77,106 @@ def register_gate(project, data=None):
         if new != current:
             hooks[event] = new
             changed = True
+    return changed
+
+
+def write_hooks(path, data, existed, changed):
     if existed and not changed:
         return "unchanged"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    write_lf(path, json.dumps(data, indent=2) + "\n")
     return "updated" if existed else "created"
+
+
+def register_gate(project, data=None):
+    """Upsert the gate hooks into <project>/.claude/settings.local.json. Returns the action."""
+    path = Path(project) / SETTINGS_LOCAL
+    existed = path.is_file()
+    data = load_settings(path) if data is None else data
+    return write_hooks(path, data, existed, upsert_hooks(data.setdefault("hooks", {}), gate_hooks()))
+
+
+def register_codex_gate(path=None, data=None):
+    """Upsert the gate hooks into the user-level Codex hooks.json (events live at the top level)."""
+    path = Path(path or CODEX_HOOKS)
+    existed = path.is_file()
+    data = load_settings(path) if data is None else data
+    return write_hooks(path, data, existed, upsert_hooks(data, codex_gate_hooks()))
+
+
+# Codex skips hooks it has not been told to trust, silently. Trust is a per-handler hash in
+# config.toml ([hooks.state.'<file>:<event>:<group>:<handler>'] trusted_hash = "sha256:..."),
+# reproduced here from codex-rs/hooks/src/engine/discovery.rs hook_hash and verified against
+# every entry on a real machine, so apply can grant it without the operator opening /hooks.
+CODEX_CONFIG = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "config.toml"
+_CODEX_EVENT_LABEL = {"PreToolUse": "pre_tool_use", "PermissionRequest": "permission_request",
+                      "PostToolUse": "post_tool_use", "PreCompact": "pre_compact", "PostCompact": "post_compact",
+                      "SessionStart": "session_start", "SessionEnd": "session_end",
+                      "UserPromptSubmit": "user_prompt_submit", "SubagentStart": "subagent_start",
+                      "SubagentStop": "subagent_stop", "Stop": "stop", "Interrupt": "interrupt"}
+_CODEX_NO_MATCHER = {"user_prompt_submit", "stop", "interrupt"}
+_CODEX_CTX_LIMIT_EVENTS = {"pre_tool_use", "post_tool_use", "session_start", "user_prompt_submit", "subagent_start"}
+
+
+def codex_hook_hash(event, group, handler, windows=None):
+    """Codex's trusted_hash for one command handler: canonical JSON of the normalised identity, sha256."""
+    windows = sys.platform == "win32" if windows is None else windows
+    cmd = (handler.get("commandWindows") or handler.get("command_windows")) if windows else None
+    cmd = cmd or handler.get("command", "")
+    t = handler.get("timeout")
+    if event in ("session_end", "interrupt"):
+        t = min(max(1 if t is None else t, 1), 3)
+    else:
+        t = max(600 if t is None else t, 1)
+    hook = {"type": "command", "command": cmd, "timeout": t, "async": bool(handler.get("async", False))}
+    if handler.get("statusMessage") is not None:
+        hook["statusMessage"] = handler["statusMessage"]
+    acl = handler.get("additionalContextLimit")
+    if event in _CODEX_CTX_LIMIT_EVENTS and acl is not None and acl != 2500:
+        hook["additionalContextLimit"] = acl
+    ident = {"event_name": event, "hooks": [hook]}
+    if group.get("matcher") is not None and event not in _CODEX_NO_MATCHER:
+        ident["matcher"] = group["matcher"]
+    blob = json.dumps(ident, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(blob).hexdigest()
+
+
+def trust_codex_gate(hooks_path=None, config_path=None):
+    """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
+    The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
+    sections are replaced or appended; every other line stays as it is."""
+    hooks_path = Path(hooks_path or CODEX_HOOKS)
+    config_path = Path(config_path or CODEX_CONFIG)
+    data = load_settings(hooks_path)
+    wanted = {}
+    for json_key, label in _CODEX_EVENT_LABEL.items():
+        for gi, group in enumerate(data.get(json_key, [])):
+            for hi, handler in enumerate(group.get("hooks", [])):
+                if "gate.py" in handler.get("command", ""):
+                    wanted[f"{hooks_path}:{label}:{gi}:{hi}"] = codex_hook_hash(label, group, handler)
+    text = config_path.read_text(encoding="utf-8") if config_path.is_file() else "[hooks.state]\n"
+    nl = "\r\n" if "\r\n" in text else "\n"
+    changed = False
+    for key, digest in wanted.items():
+        header = f"[hooks.state.'{key}']"
+        # the header at line start, then every following non-blank line that is not a table header:
+        # the whole section is replaced, so a stray comment can never leave two trusted_hash keys
+        section = re.compile(r"^" + re.escape(header) + r"[ \t]*(?:\r?\n(?!\[)(?![ \t]*\r?$)[^\r\n]*)*", re.M)
+        replacement = f"{header}{nl}trusted_hash = \"{digest}\""
+        m = section.search(text)
+        if m:
+            if m.group(0) != replacement:
+                text = text[:m.start()] + replacement + text[m.end():]
+                changed = True
+        else:
+            text = text.rstrip("\r\n") + nl + nl + replacement + nl
+            changed = True
+    if not changed and config_path.is_file():
+        return "unchanged"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    return "trusted"
 
 
 def parse_accepted(text):
@@ -140,7 +247,9 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
     gate = enforce and host == "claude-code"
+    codex = enforce and host == "codex"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
+    codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
@@ -155,6 +264,11 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
             results[other] = upsert_native(project / other, blk)
     if gate:
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
+    if codex:
+        reg = register_codex_gate(CODEX_HOOKS, codex_settings)
+        trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
+        results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
+                                          + " in config.toml (Codex loads hooks at the next session)")
     return results
 
 
