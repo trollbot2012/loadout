@@ -23,7 +23,7 @@ no live run), `not started`, `n/a` (no mechanism).
 | Grok Build | hard (fail-open on timeout) | none (Stop passive) | `updates.jsonl` | **unverified** (reads `.claude/settings.json`; not proven live) |
 | Crush | hard (PreToolUse only, exit 49 halts) | none | SQLite | not started |
 | Continue CLI | hard (undocumented) | undocumented | `~/.continue/sessions/*.json` | not started |
-| DeepSeek Harness | plugin waterfall (undocumented shape) | undocumented | undocumented | not started |
+| DeepSeek Harness | hard (`tools/pre-execute` waterfall returns `{kind:'deny',reason}`) | forced continuation via `agent.steer()`; no typed veto, no host cap | native `skill` tool + `tool/call` rows; on-disk log is multi-frame zstd | **unverified** (mechanism read from the installed 0.1.1-rc.2 source, no live run yet; adapter in progress) |
 
 ## Per-host detail
 
@@ -80,9 +80,63 @@ no live run), `not started`, `n/a` (no mechanism).
 - `crush.json` PreToolUse only; deny `{"decision":"deny"}`, exit 2 blocks, exit 49 halts the turn. No stop event. Ledger SQLite `crush.db`.
 - Source: https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md
 
-### Continue CLI, DeepSeek Harness
-- Continue: hooks shipped (PR #11029) but undocumented (issue #11678); PreToolUse/Stop exist; exit 2 = block. DeepSeek Harness: TypeScript plugin waterfalls (`tools/*`, `agent/turn-stopping`), contract undocumented.
-- Sources: https://docs.continue.dev/cli/tool-permissions ; https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md
+### Continue CLI
+- Hooks shipped (PR #11029) but undocumented (issue #11678); PreToolUse/Stop exist; exit 2 = block.
+- Source: https://docs.continue.dev/cli/tool-permissions
+
+### DeepSeek Harness (verified from source 2026-09-03, dsh 0.1.1-rc.2)
+
+Read from the installed tree, not from docs: `%LOCALAPPDATA%\Programs\DeepSeek Harnessesourcespp
+ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
+
+- **Pre-tool denial — meets the contract.** Event `tools/pre-execute`, waterfall mode
+  (`dsh-tool-cordis/lib/index.js:4305-4307`). A listener returns
+  `{kind:'deny', reason}` (it does not throw and does not call `next()`); `PreToolDecision` is
+  `{kind:'allow'} | {kind:'deny',reason} | {kind:'ask',reason?}` (`:4400`ff). The dispatcher turns a
+  denial into a model-visible error result, text `Error: <reason>`
+  (`dsh-tools/lib/types/index.js:870-889`). A second, non-vetoable path exists:
+  `ctx.tools.guard(fn)`, synchronous, where returning a string denies (`:512-520`).
+- **Stop blocking — different mechanism, same effect, weaker failure mode.** `agent/turn-stopping`
+  is serial and returns void (`dsh-tool-cordis/lib/index.js:3868-3872`): a listener cannot veto.
+  It calls `agent.steer(message)` and the loop re-reads its inbox, so the turn does not close
+  (`dsh-agent-loop/lib/index.js:564-571`). The reason reaches the model only as the text of that
+  injected message, not as a typed field — the same way Codex renders a block as a `HookPrompt`.
+  **No consecutive-block cap exists anywhere in the shipped tree**, which matches the external-only
+  disablement policy. The failure mode differs from Claude Code and Codex: there the host enforces
+  the block, so a broken gate still fails safe; here the plugin forces continuation itself, so a
+  plugin that errors lets the turn end. The adapter must guard that explicitly.
+- **Skill invocation — meets the contract, and is the strongest signal of any host.** A native
+  model-facing `skill` tool takes `{name}` and resolves through the skills registry rather than the
+  `read` tool (`dsh-tool-skill/lib/index.js:37-135`); roots are `<project>/.dsh/skills`,
+  `<project>/.agents/skills`, `$DSH_HOME/skills`, `$AGENTS_HOME/skills`
+  (`dsh-skill-filesystem/lib/index.js:155-177`), bundle form `<name>/SKILL.md`. Each call is logged
+  as an ordinary `tool/call` + `tool/result` pair. A user-typed `/name` instead injects the
+  instructions at `agent/pre-step` as a UserMessage with `source:{kind:"skill-invocation",name,...}`
+  (`:167-176`) and is **not** a `tool/call`. Both are real loads; a bare mention is neither.
+- **Ledger — differs in encoding.** `~/.dsh/sessions/<slugified-cwd>/<session-uuid>/session.jsonl.zstd`,
+  JSONL inside **multi-frame** Zstandard, one frame per flush, so a single-shot decompress returns
+  only the first frame (`dsh-session-persistence-jsonl/lib/index.js:26-29`, decoder `:450-484`).
+  There is also a SQLite query index (`dsh-session-query-sqlite/lib/index.js:49`). Records are
+  `{"type","seq","time","data"}` with `type` = the Cordis event name; a write is
+  `tool/call` with `name:"write"`, a shell command `name:"pwsh"`, a read `name:"read"`, a skill load
+  `name:"skill"`. **Python 3.9–3.13 has no stdlib zstd**, so this project cannot parse that file: the
+  adapter takes its facts from the live event stream inside the plugin instead.
+- **Registration — differs.** Plugins are Cordis loader entries composed from the profile's
+  `package.json` `dsh.profile.bundles`, each bundle's `cordis.patch.yml`, then the profile's own
+  `cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`, then `--patch` overlays
+  (`dsh/lib/profile-boot-*.js:150-177`, `dsh-app-boot/lib/index.js:291-311`). `settings.yaml` holds
+  per-plugin settings only, not registration. `dsh plugin add` is a thin **pnpm** forwarder
+  (`dsh/lib/bin.js:96-101`) and pnpm is absent on this machine. There is **no project-level plugin
+  config** (a repo's `.dsh/` holds skills and AGENTS.md only) and **no trust gate on plugin load**;
+  patch YAML permits `!!js` expressions. The enforcement surface on this host therefore has to
+  include `cordis.patch.yml`, the profile `package.json` and `settings.yaml`.
+- **Language — meets the contract via a wrapper.** A plugin is an in-process ESM module
+  (`apply(ctx, config)`); there is no external-process hook runner (`hook/invoked` and `hook/result`
+  are reserved session-event names with zero producers). But `tools/pre-execute` is an awaited async
+  waterfall, so a plugin can spawn and await the Python gate and return its decision. Note
+  `ctx.subprocess` scrubs `DSH_*`/secret environment from children
+  (`dsh-subprocess/lib/index.js:26-44, 52-85`).
+- **Headless proof path exists**: `dsh --profile headless "<task>"` answers one task and exits.
 
 ## Adapter checklist (per host)
 
