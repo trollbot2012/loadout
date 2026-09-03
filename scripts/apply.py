@@ -11,8 +11,12 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
   - any other native file that already exists in the project (keeps every harness consistent).
   - on claude-code, the enforcement gate (scripts/gate.py) as PreToolUse + Stop hooks in
     .claude/settings.local.json, unless --no-enforce. Hooks load at the next session.
-  - on codex, the same gate in the user-level ~/.codex/hooks.json ($CODEX_HOME honoured):
-    project-level Codex hooks need a trusted project, and the gate is a no-op without LOADOUT.md.
+  - on codex, ONLY with --enforce-codex, the same gate in the user-level ~/.codex/hooks.json
+    ($CODEX_HOME honoured). Off by default: on Codex 0.152.1 a registered gate crashed the
+    desktop app's app-server (hard abort ~20s after launch, no respawn, every request then
+    failing with "Codex app-server process is not available"), and a schema-correct nested
+    entry did it as readily as the malformed root-level one an older version wrote. Without
+    the flag --host codex wires the prose section only.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -45,11 +49,51 @@ def gate_hooks():
 def codex_gate_hooks():
     """Same gate for Codex CLI, in its Claude-shaped hooks.json. No PreToolUse matcher: Codex tool names
     differ from Claude's, so the gate decides by name itself. Codex runs hooks through PowerShell on
-    Windows, where a quoted path at command position needs the call operator; bash takes the plain form."""
+    Windows, where a quoted path at command position needs the call operator; bash takes the plain form.
+    Event names are keys of the map returned here; the caller nests it under the file's root "hooks"
+    object -- Codex's schema accepts only "description"/"hooks" at the root. commandWindows (camelCase)
+    is the canonical field Codex itself writes; codex_hook_hash() still tolerates the old snake_case
+    form when reading, but we only ever write the canonical one."""
     def entry(mode):
         posix = f'"{sys.executable}" "{GATE}" {mode} --host codex'
-        return {"hooks": [{"type": "command", "command": posix, "command_windows": "& " + posix, "timeout": 20}]}
+        return {"hooks": [{"type": "command", "command": posix, "commandWindows": "& " + posix, "timeout": 20}]}
     return {"PreToolUse": [entry("pre")], "Stop": [entry("stop")]}
+
+
+def _all_gate_entries(entries):
+    """True when every handler across every group in `entries` is one of this repo's own gate hooks
+    (identified the same way upsert_hooks does: the "gate.py" command substring). An entries list with
+    no handlers at all (junk/empty) counts as all-gate too -- there is nothing foreign to protect."""
+    for group in entries:
+        if not isinstance(group, dict):
+            return False
+        for h in group.get("hooks", []):
+            if not isinstance(h, dict) or "gate.py" not in h.get("command", ""):
+                return False
+    return True
+
+
+def _migrate_stray_root_events(data):
+    """Codex's hooks.json root accepts ONLY "description"/"hooks" -- any other root key fails to load
+    every hook in the file, not just an invalid one. An earlier version of this writer put the gate's
+    event entries straight at the root; move any such stray root key that holds ONLY our own gate
+    entries under "hooks", deleting the now-empty root key. A stray root key holding any entry that is
+    NOT ours is left completely untouched (it is not our data to move or delete) and its name is
+    returned so the caller can report it. Mutates `data` in place; returns (foreign_keys, moved_any)."""
+    foreign = []
+    moved = False
+    for key in [k for k in data if k not in ("description", "hooks")]:
+        entries = data[key]
+        if not isinstance(entries, list):
+            continue
+        if _all_gate_entries(entries):
+            if entries:
+                data.setdefault("hooks", {}).setdefault(key, []).extend(entries)
+            del data[key]
+            moved = True
+        else:
+            foreign.append(key)
+    return foreign, moved
 
 
 def load_settings(path):
@@ -97,11 +141,17 @@ def register_gate(project, data=None):
 
 
 def register_codex_gate(path=None, data=None):
-    """Upsert the gate hooks into the user-level Codex hooks.json (events live at the top level)."""
+    """Upsert the gate hooks into the user-level Codex hooks.json, nested under the root "hooks" object
+    (Codex's schema; see _migrate_stray_root_events for why root-level event keys are never written)."""
     path = Path(path or CODEX_HOOKS)
     existed = path.is_file()
     data = load_settings(path) if data is None else data
-    return write_hooks(path, data, existed, upsert_hooks(data, codex_gate_hooks()))
+    foreign, moved = _migrate_stray_root_events(data)
+    changed = upsert_hooks(data.setdefault("hooks", {}), codex_gate_hooks()) or moved
+    action = write_hooks(path, data, existed, changed)
+    if foreign:
+        action += f"; WARNING: root-level {', '.join(sorted(foreign))} left as-is (holds non-gate entries)"
+    return action
 
 
 # Codex skips hooks it has not been told to trust, silently. Trust is a per-handler hash in
@@ -141,6 +191,42 @@ def codex_hook_hash(event, group, handler, windows=None):
     return "sha256:" + hashlib.sha256(blob).hexdigest()
 
 
+def _codex_gate_digests():
+    """Every trusted_hash this writer could ever have produced for a gate handler: both events, both
+    command forms (Codex hashes commandWindows on Windows, command elsewhere) and the legacy
+    snake_case command_windows an older version wrote. A stored hash in this set was written by us."""
+    digests = set()
+    for json_key, groups in codex_gate_hooks().items():
+        label = _CODEX_EVENT_LABEL[json_key]
+        for group in groups:
+            for handler in group["hooks"]:
+                legacy = {("command_windows" if k == "commandWindows" else k): v for k, v in handler.items()}
+                for shape in (handler, legacy):
+                    for windows in (True, False):
+                        digests.add(codex_hook_hash(label, group, shape, windows))
+    return digests
+
+
+def _drop_stale_gate_trust(text, hooks_path, wanted):
+    """Remove [hooks.state] entries for `hooks_path` that we wrote for the gate but that no longer
+    describe it. Trust keys are positional (<event>:<group>:<handler>) while the gate is re-found by
+    its command, so a hook inserted ahead of ours shifts the gate and strands our entry on someone
+    else's handler -- which Codex reads as "modified since last trusted" and then refuses to run it.
+    Only entries whose stored hash is one of ours are touched; anything else is left exactly as is.
+    Returns (text, dropped_any)."""
+    ours = _codex_gate_digests()
+    pattern = re.compile(
+        r"^\[hooks\.state\.'(" + re.escape(str(hooks_path)) + r":[^']*)'\][ \t]*\r?\n"
+        r"trusted_hash = \"(sha256:[0-9a-f]+)\"[ \t]*(?:\r?\n)?(?:[ \t]*\r?\n)?", re.M)
+
+    def drop(m):
+        key, digest = m.group(1), m.group(2)
+        return "" if digest in ours and key not in wanted else m.group(0)
+
+    new = pattern.sub(drop, text)
+    return new, new != text
+
+
 def trust_codex_gate(hooks_path=None, config_path=None):
     """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
     The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
@@ -148,15 +234,16 @@ def trust_codex_gate(hooks_path=None, config_path=None):
     hooks_path = Path(hooks_path or CODEX_HOOKS)
     config_path = Path(config_path or CODEX_CONFIG)
     data = load_settings(hooks_path)
+    events = data.get("hooks", {}) if isinstance(data.get("hooks"), dict) else {}
     wanted = {}
     for json_key, label in _CODEX_EVENT_LABEL.items():
-        for gi, group in enumerate(data.get(json_key, [])):
+        for gi, group in enumerate(events.get(json_key, [])):
             for hi, handler in enumerate(group.get("hooks", [])):
                 if "gate.py" in handler.get("command", ""):
                     wanted[f"{hooks_path}:{label}:{gi}:{hi}"] = codex_hook_hash(label, group, handler)
     text = config_path.read_text(encoding="utf-8") if config_path.is_file() else "[hooks.state]\n"
     nl = "\r\n" if "\r\n" in text else "\n"
-    changed = False
+    text, changed = _drop_stale_gate_trust(text, hooks_path, wanted)
     for key, digest in wanted.items():
         header = f"[hooks.state.'{key}']"
         # the header at line start, then every following non-blank line that is not a table header:
@@ -239,7 +326,7 @@ def upsert(path, blk, create_with=None):
     return action
 
 
-def apply(project, host, loadout="LOADOUT.md", enforce=True):
+def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False):
     project = Path(project)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
     accepted = parse_accepted(text)
@@ -247,7 +334,9 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True):
         raise ValueError(f"no '- <stage>: `<skill>`' lines under '## Accepted' in {loadout}")
     blk = block(accepted)
     gate = enforce and host == "claude-code"
-    codex = enforce and host == "codex"
+    # opt-in: registering the gate in ~/.codex/hooks.json crashed the Codex desktop app-server
+    # (0.152.1) ~20s after every launch, with a schema-correct entry as much as a malformed one
+    codex = enforce and enforce_codex and host == "codex"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
@@ -280,12 +369,13 @@ def main():
     host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
     loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
     enforce = "--no-enforce" not in argv
+    enforce_codex = "--enforce-codex" in argv
     args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     try:
-        results = apply(args[0], host, loadout, enforce)
+        results = apply(args[0], host, loadout, enforce, enforce_codex)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
