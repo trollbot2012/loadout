@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-import gate  # same directory; owns Facts, write_shaped, COMMAND_RE and STOP_REASON
+import gate  # same directory; owns Facts, write_shaped and STOP_REASON
 
 _CODEX_NAME = re.compile(r"^rollout-")
 

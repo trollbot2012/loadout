@@ -85,6 +85,17 @@ Every other host. Cursor and Grok stay `unverified` even though they read Claude
   section up to the next table header, so a stray comment can never leave two `trusted_hash` keys.
 - `find_rollout` escapes the session id before globbing.
 
+## Live re-proof after the contract tightening (2026-09-02)
+
+- Run 1, no skill read: 4 PreToolUse denials, 36 consecutive Stop blocks, no release. The session
+  ended only when the external 150 s timeout killed it (exit 124); README untouched. This is the
+  accepted cost of removing the cap, observed rather than argued.
+- Run 2, SKILL.md read: the read counted, the edit applied (README changed), 4 Stop blocks until the
+  review stage's SKILL.md was also read, then a clean finish (exit 0).
+- Codex does not surface hook stderr, so the gate's runaway note never reaches the operator; the
+  visible signal is repeated `hook: Stop Blocked`. (`hook: Stop Failed` lines came from an unrelated
+  pre-existing Stop hook on the machine.)
+
 ## Contract review (2026-09-02): two redesigns before merge
 
 - A bare `$skill` mention no longer counts as invoking a skill. Only a real SKILL.md read does
