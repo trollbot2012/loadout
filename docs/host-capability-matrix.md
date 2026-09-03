@@ -91,9 +91,7 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 
 ### DeepSeek Harness (verified from source 2026-09-03, dsh 0.1.1-rc.2)
 
-Read from the installed tree, not from docs: `%LOCALAPPDATA%\Programs\DeepSeek Harness
-esourcespp
-ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
+Read from the installed tree, not from docs: `%LOCALAPPDATA%/Programs/DeepSeek Harness/resources/app/node_modules/@deepseek-ai/` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
 
 - **Pre-tool denial — meets the contract.** Event `tools/pre-execute`, waterfall mode
   (`dsh-tool-cordis/lib/index.js:4305-4307`). A listener returns
