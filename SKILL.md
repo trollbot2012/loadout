@@ -243,8 +243,10 @@ exits 1 when any copy is stale or missing.
   the in-session skill list for "what can I invoke right now", the scanner for
   "what is installed on this machine" and for the off/on markers.
   The enforcement gate exists for Claude Code and Codex CLI in this version (Codex: user-level
-  `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next session; other
-  hosts are prose only until `docs/host-capability-matrix.md` says proven). Operator hatch:
+  `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next session; on Codex a
+  skill counts as invoked only when its SKILL.md is actually read, and there is no block cap, so a
+  stuck session is ended by the operator, not the gate; other hosts are prose only until
+  `docs/host-capability-matrix.md` says proven). Operator hatch:
   `LOADOUT_ENFORCE=0` or remove LOADOUT.md; there is no agent-side override, and
   writes to LOADOUT.md, AGENTS.md or CLAUDE.md are gated like any other edit (only an
   exact `apply.py` invocation passes as a re-bootstrap). Ceilings: Claude Code overrides

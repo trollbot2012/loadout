@@ -35,6 +35,14 @@ def command(cmd):
     return item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", cmd], "cwd": "file:///C:/proj"})
 
 
+
+def skill_read(name):
+    """A CommandExecution whose parsed_cmd reads <skills root>/<name>/SKILL.md: the only invocation signal on Codex."""
+    path = f"C:/u/.agents/skills/{name}/SKILL.md"
+    return item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", f"Get-Content -Raw '{path}'"],
+                 "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": path}]})
+
+
 def exec_call(js):
     return {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": js}}
 
@@ -47,9 +55,12 @@ def test_fixture_facts():
     assert f.invoked == set()  # the probe prompt mentions apply_patch, not a $skill
 
 
-def test_skill_mention_and_command_name(tmp_path):
+def test_a_bare_mention_is_not_an_invocation(tmp_path):
+    # contract: only a real SKILL.md read counts; a $name mention or a slash tag in user text does not
     p = rollout(tmp_path, [meta(), user("please $loadout this, then <command-name>/loopy</command-name>")])
-    assert gate_codex.transcript_facts(p).invoked == {"loadout", "loopy"}
+    assert gate_codex.transcript_facts(p).invoked == set()
+    p = rollout(tmp_path, [meta(), user("please $loadout this"), skill_read("loadout")])
+    assert gate_codex.transcript_facts(p).invoked == {"loadout"}
 
 
 def test_write_shaped_command_is_an_edit(tmp_path):
@@ -82,14 +93,16 @@ def test_blocks_count_consecutively_and_reset_on_skill(tmp_path):
     block = item({"type": "HookPrompt", "id": "m1", "fragments": [{"text": gate.STOP_REASON + ": stage (`loadout`)", "hookRunId": "stop:9:x"}]})
     p = rollout(tmp_path, [meta(), block, block])
     assert gate_codex.transcript_facts(p).blocks == 2
-    p = rollout(tmp_path, [meta(), block, user("$loadout"), block])
+    p = rollout(tmp_path, [meta(), block, skill_read("loadout"), block])
     assert gate_codex.transcript_facts(p).blocks == 1
+    p = rollout(tmp_path, [meta(), block, user("$loadout"), block])
+    assert gate_codex.transcript_facts(p).blocks == 2, "a mention is not progress"
 
 
 def test_tolerates_garbage(tmp_path):
     p = rollout(tmp_path, ["not json", "[1,2]", json.dumps({"type": "event_msg", "payload": "x"}),
                            json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": None}}),
-                           command("touch a"), user("$loadout")])
+                           command("touch a"), skill_read("loadout")])
     f = gate_codex.transcript_facts(p)
     assert f.edited is True and f.invoked == {"loadout"} and f.cwd is None
     assert gate_codex.transcript_facts(tmp_path / "missing.jsonl") == gate.Facts(set(), False, None, 0)
@@ -152,15 +165,17 @@ def test_codex_pre_denies_write_before_stage_one_and_allows_after(tmp_path):
     assert "`planner`" in out["hookSpecificOutput"]["permissionDecisionReason"]
     assert run_gate("pre", codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "git status --short"}), host="codex") is None
     t = rollout(tmp_path, [meta(str(proj)), user("$planner then do the thing")])
-    assert run_gate("pre", hook, host="codex") is None
+    assert run_gate("pre", hook, host="codex")["hookSpecificOutput"]["permissionDecision"] == "deny", "mention alone is not enough"
+    t = rollout(tmp_path, [meta(str(proj)), user("$planner then do the thing"), skill_read("planner")])
+    assert run_gate("pre", hook | {"transcript_path": str(t)}, host="codex") is None
 
 
 def test_codex_stop_blocks_after_an_edit_with_stages_missing(tmp_path):
     proj = project(tmp_path)
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner go"), file_change(proj)])
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner"), file_change(proj)])
     out = run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=False, last_assistant_message="done"), host="codex")
     assert out["decision"] == "block" and "review (`reviewer`)" in out["reason"] and "unlazy" not in out["reason"]
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner go"), user("$reviewer"), file_change(proj)])
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner"), skill_read("reviewer"), file_change(proj)])
     assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None
     t = rollout(tmp_path, [meta(str(proj)), user("just a question"), command("git status --short")])
     assert run_gate("stop", codex_hook(proj, t, "stop"), host="codex") is None, "read-only session is never trapped"
@@ -171,7 +186,7 @@ def test_codex_transcript_is_auto_detected_without_host_flag(tmp_path):
     t = rollout(tmp_path, [meta(str(proj)), user("do it")], name="rollout-2026-09-02T00-00-00-abc.jsonl")
     hook = codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "echo hi > a.txt"})
     assert run_gate("pre", hook)["hookSpecificOutput"]["permissionDecision"] == "deny"
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner do it")], name="rollout-2026-09-02T00-00-01-abc.jsonl")
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner")], name="rollout-2026-09-02T00-00-01-abc.jsonl")
     assert run_gate("pre", hook | {"transcript_path": str(t)}) is None
 
 
@@ -181,7 +196,7 @@ def test_codex_apply_patch_is_an_edit_and_the_surface_stays_operator_owned(tmp_p
     t = rollout(tmp_path, [meta(str(proj)), user("do it")])
     hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": patch}, tool_use_id="e1")
     assert run_gate("pre", hook, host="codex")["hookSpecificOutput"]["permissionDecision"] == "deny"
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner do it")])
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner")])
     assert run_gate("pre", hook | {"transcript_path": str(t)}, host="codex") is None
     surface = "*** Begin Patch\n*** Update File: LOADOUT.md\n@@\n-- review: `reviewer`\n*** End Patch"
     out = run_gate("pre", hook | {"transcript_path": str(t), "tool_input": {"command": surface}}, host="codex")
@@ -194,7 +209,7 @@ def test_codex_stop_without_transcript_path_finds_the_rollout_by_session_id(tmp_
     sessions = home / "sessions" / "2026" / "09" / "02"
     sessions.mkdir(parents=True)
     sid = "01a0643e-4855-7422-a7b7-3f301d7bf153"
-    rollout(sessions, [meta(str(proj)), user("$planner go"), file_change(proj)], name=f"rollout-2026-09-02T17-30-00-{sid}.jsonl")
+    rollout(sessions, [meta(str(proj)), skill_read("planner"), file_change(proj)], name=f"rollout-2026-09-02T17-30-00-{sid}.jsonl")
     monkeypatch.setenv("CODEX_HOME", str(home))
     hook = {"session_id": sid, "turn_id": "t1", "cwd": str(proj), "hook_event_name": "Stop",
             "permission_mode": "bypassPermissions", "stop_hook_active": False, "last_assistant_message": "done"}
@@ -221,22 +236,24 @@ def hook_prompt(text):
     return item({"type": "HookPrompt", "id": "m1", "fragments": [{"text": text, "hookRunId": "stop:9:x"}]})
 
 
-def test_stop_block_cap_counts_hook_prompt_items(tmp_path):
+def test_codex_has_no_stop_cap_blocks_persist_until_the_operator_intervenes(tmp_path):
+    # contract: disablement is external-only. Codex has no host-side release, so the gate never yields
+    # on its own; the count is kept for the stderr note, not for a release.
     proj = project(tmp_path)
     block = hook_prompt("Loadout gate: stages not run this session: review (`reviewer`). Invoke them, then stop.")
-    base = [meta(str(proj)), user("$planner go"), file_change(proj)]
-    t = rollout(tmp_path, base + [block] * (gate.STOP_BLOCK_CAP - 1))
-    assert gate_codex.transcript_facts(t).blocks == gate.STOP_BLOCK_CAP - 1
-    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex")["decision"] == "block"
-    t = rollout(tmp_path, base + [block] * gate.STOP_BLOCK_CAP)
-    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None, "cap: allow"
-    t = rollout(tmp_path, base + [block] * gate.STOP_BLOCK_CAP + [user("$reviewer")])
-    assert gate_codex.transcript_facts(t).blocks == 0, "a skill invocation resets the run"
+    base = [meta(str(proj)), skill_read("planner"), file_change(proj)]
+    for n in (gate.STOP_BLOCK_CAP - 1, gate.STOP_BLOCK_CAP, gate.STOP_BLOCK_CAP + 50):
+        t = rollout(tmp_path, base + [block] * n)
+        assert gate_codex.transcript_facts(t).blocks == n
+        out = run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex")
+        assert out and out["decision"] == "block", f"after {n} blocks"
+    t = rollout(tmp_path, base + [block] * 3 + [skill_read("reviewer")])
+    assert run_gate("stop", codex_hook(proj, t, "stop", stop_hook_active=True), host="codex") is None
 
 
 def test_apply_patch_move_to_surface_file_is_denied(tmp_path):
     proj = project(tmp_path)
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner go")])
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner")])
     rename = "*** Begin Patch\n*** Update File: notes.md\n*** Move to: LOADOUT.md\n@@\n-a\n+b\n*** End Patch"
     hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": rename}, tool_use_id="e1")
     out = run_gate("pre", hook, host="codex")
@@ -245,7 +262,7 @@ def test_apply_patch_move_to_surface_file_is_denied(tmp_path):
 
 def test_codex_hook_config_is_operator_owned_surface(tmp_path):
     proj = project(tmp_path)
-    t = rollout(tmp_path, [meta(str(proj)), user("$planner go")])  # stage 1 done: only the surface is gated
+    t = rollout(tmp_path, [meta(str(proj)), skill_read("planner")])  # stage 1 done: only the surface is gated
     patch = lambda path: f"*** Begin Patch\n*** Update File: {path}\n@@\n-a\n+b\n*** End Patch"  # noqa: E731
     for target in [".codex/hooks.json", str(tmp_path / "home" / ".codex" / "config.toml"), "~/.codex/hooks.json"]:
         hook = codex_hook(proj, t, "pre", tool_name="apply_patch", tool_input={"command": patch(target)})

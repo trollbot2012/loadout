@@ -32,8 +32,9 @@ run before the matrix row says `proven`.
   `session_meta.payload.cwd`; `event_msg/item_completed` items `FileChange` (changes map),
   `CommandExecution` (command list + cwd), `UserMessage` (prompt text); `response_item/custom_tool_call`
   named `exec` whose input is JS calling `tools.apply_patch` / `tools.exec_command`.
-  Skill use: the user's `$name` mention counts, and so does a `CommandExecution` whose `parsed_cmd`
-  reads `<skills root>/<name>/SKILL.md` (verified live; there is no skill event).
+  Skill use: only a `CommandExecution` whose `parsed_cmd` reads `<skills root>/<name>/SKILL.md`
+  counts (verified live; there is no skill event). A `$name` mention in the prompt is the user's
+  intent, not the agent loading the skill, and does not count.
 - Stop block feedback is injected as the next prompt and recorded as an `item_completed` of type
   `HookPrompt` (fragments[].text); consecutive blocks are counted from those, reset by a skill invocation.
 
@@ -46,9 +47,8 @@ run before the matrix row says `proven`.
   `transcript_path`; the gate locates `<CODEX_HOME>/sessions/*/*/*/rollout-*-<session_id>.jsonl`.
 - The `& "<python>" "<gate.py>" <mode> --host codex` form runs under Codex's PowerShell hook shell
   (probe: both PreToolUse and Stop completed); an unquoted-call form with a quoted path fails.
-- Skill use has no rollout event. It appears as the user's `$name` mention and as a
-  `CommandExecution` whose `parsed_cmd` reads `<skills root>/<name>/SKILL.md`; both count, the read
-  is the stronger signal and resets the block run.
+- Skill use has no rollout event. It appears as a `CommandExecution` whose `parsed_cmd` reads
+  `<skills root>/<name>/SKILL.md`; that read is the only invocation signal and resets the block run.
 - Headless `codex exec` must run with stdin closed (`< /dev/null`) or it waits for more prompt input.
 - `--approve-for-me` cannot be combined with `-s`; use `-s workspace-write -c approval_policy="never"`.
 
@@ -84,3 +84,14 @@ Every other host. Cursor and Grok stay `unverified` even though they read Claude
 - `trust_codex_gate` matches `[hooks.state.'<key>']` sections line-anchored and replaces the whole
   section up to the next table header, so a stray comment can never leave two `trusted_hash` keys.
 - `find_rollout` escapes the session id before globbing.
+
+## Contract review (2026-09-02): two redesigns before merge
+
+- A bare `$skill` mention no longer counts as invoking a skill. Only a real SKILL.md read does
+  (Codex has no native invocation event). The mention path and its regex are removed.
+- The Stop-block cap does not apply on Codex. On Claude Code the host itself releases a Stop hook
+  after 8 consecutive blocks, so yielding there mirrors a limit that exists anyway. Codex has no such
+  limit, so a gate-side cap would be an in-session bypass, which the disablement contract
+  (external-only) forbids. The gate now blocks every time on Codex; the block count is kept only for
+  the stderr note. Cost: an unattended Codex session that refuses its stages loops until the operator
+  ends it. Reinstating a cap on Codex requires explicit approval as a deliberately weaker policy.

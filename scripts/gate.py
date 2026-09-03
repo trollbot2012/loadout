@@ -233,16 +233,23 @@ def _deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
-def ledger_facts(tp, host=None, session_id=None):
-    """Facts from the host's own transcript format. Codex rollouts are selected by --host codex or
-    detected from the file itself; everything else is the Claude Code JSONL. Codex's Stop payload
-    carries no transcript_path, only session_id, so the rollout is located by that id."""
-    if host == "codex" or (host is None and tp):
+def resolve_host(tp, host=None):
+    """'codex' when told so or when the transcript is a Codex rollout, else 'claude-code'."""
+    if host == "codex":
+        return "codex"
+    if host is None and tp:
         import gate_codex  # same directory; imported lazily because it imports this module
-        if host == "codex" and not tp:
-            tp = gate_codex.find_rollout(session_id)
-        if host == "codex" or gate_codex.is_codex_transcript(tp):
-            return gate_codex.transcript_facts(tp)
+        if gate_codex.is_codex_transcript(tp):
+            return "codex"
+    return "claude-code"
+
+
+def ledger_facts(tp, host=None, session_id=None):
+    """Facts from the host's own transcript format. Codex's Stop payload carries no transcript_path,
+    only session_id, so the rollout is located by that id."""
+    if resolve_host(tp, host) == "codex":
+        import gate_codex
+        return gate_codex.transcript_facts(tp or gate_codex.find_rollout(session_id))
     return transcript_facts(tp)
 
 
@@ -298,9 +305,18 @@ def decide(mode, hook, env=None, host=None):
         missing = [(s, k) for s, k in stages if k not in facts.invoked]
         if not missing:
             return None
-        if facts.blocks >= STOP_BLOCK_CAP:  # runaway guard, scoped to this transcript by construction
-            sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (cap).\n")
-            return None
+        if facts.blocks >= STOP_BLOCK_CAP:
+            if resolve_host(tp, host) == "codex":
+                # Codex has no host-side release. Disablement is external-only by contract, so the gate
+                # keeps blocking; the operator ends the loop (LOADOUT_ENFORCE=0, interrupt, or remove
+                # LOADOUT.md). The note makes a runaway visible in hook output.
+                sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; "
+                                 "still blocking (no cap on Codex; operator hatch LOADOUT_ENFORCE=0).\n")
+            else:
+                # Claude Code overrides a Stop hook itself after 8 consecutive blocks; yielding here only
+                # mirrors that host limit instead of fighting it
+                sys.stderr.write(f"loadout gate: {facts.blocks} consecutive Stop blocks without progress; allowing (host cap).\n")
+                return None
         return {"decision": "block",
                 "reason": "Loadout gate: stages not run this session: "
                           + ", ".join(f"{s} (`{k}`)" for s, k in missing)

@@ -13,8 +13,6 @@ from pathlib import Path
 
 import gate  # same directory; owns Facts, write_shaped, COMMAND_RE and STOP_REASON
 
-# Codex skill mention syntax in a user prompt: `$loadout`
-SKILL_MENTION_RE = re.compile(r"(?<![\w$])\$([A-Za-z0-9][\w-]*)")
 _CODEX_NAME = re.compile(r"^rollout-")
 
 
@@ -43,18 +41,6 @@ def find_rollout(session_id, home=None):
     except OSError:
         return None
     return str(hits[-1]) if hits else None
-
-
-def _user_skills(text):
-    """Skill names a user prompt invokes. Single place to extend once the probe shows Codex's
-    native skill-invocation record."""
-    return set(SKILL_MENTION_RE.findall(text)) | set(gate.COMMAND_RE.findall(text))
-
-
-def _text(content):
-    if not isinstance(content, list):
-        return ""
-    return "\n".join(str(c.get("text") or "") for c in content if isinstance(c, dict))
 
 
 def transcript_facts(path):
@@ -94,11 +80,8 @@ def transcript_facts(path):
                 if read:
                     invoked |= read
                     events.append("skill")
-            elif t == "UserMessage":  # only the user can invoke a skill
-                skills = _user_skills(_text(it.get("content")))
-                invoked |= skills
-                if skills:
-                    events.append("skill")
+            # UserMessage text is deliberately not an invocation signal: a `$name` mention is the user's
+            # intent, not the agent loading the skill. Only the SKILL.md read above counts.
             elif t == "HookPrompt":
                 # recorded live: an injected Stop-block reason lands here (fragments[].text). Codex has no
                 # block cap of its own, so this count is the only runaway guard on this host
