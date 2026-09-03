@@ -47,6 +47,36 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 - Ledger: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`; lines `session_meta`, `turn_context`, `event_msg`, `response_item`. Verified live: edits = `item_completed` FileChange, shell = CommandExecution (`parsed_cmd` reads), skill use = a parsed read of `<skills>/<name>/SKILL.md` only (a `$name` mention is not invocation), injected Stop-block reason = `HookPrompt` item. PreToolUse stdin is Claude-shaped (`Bash`, `apply_patch`); Stop stdin has no `transcript_path` (located by `session_id`). Hooks run through PowerShell here: `command_windows` uses the call operator. Codex has no block cap and the gate adds none on this host: blocking continues until the operator intervenes.
 - Proof (headless `codex exec`, 2026-09-02, re-run after the contract tightening): run 1, no skill read: 4 edit denials, 36 consecutive Stop blocks, never released, ended only when the 150 s external timeout killed it (exit 124), README untouched. Run 2, SKILL.md actually read: no denials, the edit applied, 4 Stop blocks until both binding stages' SKILL.md had been read, then a clean finish (exit 0).
 - Note: Codex does not surface hook stderr, so the gate's runaway note is invisible to the operator; repeated `hook: Stop Blocked` lines are the only signal. `hook: Stop Failed` lines in these runs come from an unrelated pre-existing Stop hook on the machine, not from the gate. Run 2 with `$planning-with-files`: skill read counted, edit allowed, Stop blocked with review missing until the review skill was read.
+- **Crash investigation, 2026-09-03 — the gate is not the cause.** A parallel session reported that a
+  registered gate crashed the Codex 0.152.1 desktop app-server (0xc0000409 about 20 s after launch)
+  and made enforcement opt-in behind `--enforce-codex`. The crashes are real: Windows Error
+  Reporting shows four `codex.exe` faults on 2026-09-02 (22:56 and 23:00 desktop app-server, 23:40
+  twice standalone CLI). Attribution to the gate does not survive:
+  - Minidump analysis (stdlib parser; no debugger on the box): `ExceptionInformation[0] = 7` and
+    `Rcx = 7`, i.e. `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — Rust's `abort_internal`, not a stack
+    cookie. The faulting thread is `tokio-rt-worker` in all five dumps, and the five shared frames
+    are the std panic-to-abort runtime under four *different* callers: four root causes, one abort
+    path.
+  - No positive trace of the gate: zero hits for `gate.py` or the Python interpreter path in any
+    dump. Every `hooks.json` hit is a `hooks.json:<event>:<i>:<j>` trust key from parsing
+    `config.toml` at startup, not hook execution. The one `PreToolUse` hit is a skill description.
+  - The two CLI crashes burned 0 s user and 0 s kernel CPU in 26 s and 14 s and wrote no session
+    rollout, so no turn ran and neither `PreToolUse` nor `Stop` could have fired. Their memory is
+    dominated by plugin-marketplace JSON, `plugins/cache` paths and an age/scrypt secrets stanza on
+    the faulting stack: startup config, plugin and secret loading.
+  - Upstream reports the same desktop fault with identical offsets and an *empty* `CODEX_HOME`,
+    no hooks configured (openai/codex #37164, #36096); no upstream issue attributes 0xc0000409 to
+    hooks. Codex's hook subsystem has three reachable panic sites, all `unreachable!` invariant
+    guards, none reachable from spawning a script.
+  - A dump from 14:36 that day predates any gate registration (the 20:38 `hooks.json` backup has no
+    `gate.py`), and the reported bisect also varied trust bookkeeping, the presence of any
+    `PreToolUse` group at all, and three `hooks.json` rewrites inside the trial window.
+  Enforcement stays opt-in as cheap caution, but the justification above is the accurate one. Note
+  also openai/codex #38168: on Windows a hook command with embedded quotes can silently never run
+  while still reporting `Completed` — a live enforcement-integrity trap, though a recorder probe
+  confirmed the `&`-prefixed `commandWindows` form does execute on this machine.
+- Scope of the `proven` status: headless `codex exec`. The desktop app-server path was never
+  exercised by these proofs and is not claimed.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json
 
 ### Qwen Code
