@@ -8,7 +8,14 @@ This checks the rules the file can prove on its own.
 Coverage is deliberately out of scope: which skills are installed differs per machine, so a
 missing row is not something this file can know about. `scan.py` reports what is installed.
 
-    python3 scripts/check_notes.py [path]     # default: references/skill-notes.md
+    python3 scripts/check_notes.py [path]                      # internal consistency
+    python3 scripts/check_notes.py [path] --installed a,b,c    # also check against a machine
+
+A table is generated on one machine, so a group's preferred skill can be absent on another.
+`--installed` takes the skill names a host actually has (a comma list, or a file with one
+name per line) and reports every group whose preferred skill is missing, naming the installed
+members to prefer instead. A group with no installed member at all is not reported: it is
+simply irrelevant there.
 
 Exit 0 clean, 1 rule violations (listed), 2 file missing or unparseable.
 """
@@ -48,7 +55,15 @@ def parse(text):
     return rows, prefer
 
 
-def check(path):
+def installed_set(arg):
+    """Skill names from a comma list or a file holding one name per line."""
+    p = Path(arg)
+    if p.is_file():
+        return {ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    return {n.strip() for n in arg.split(",") if n.strip()}
+
+
+def check(path, installed=None):
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
@@ -85,6 +100,12 @@ def check(path):
         cats = sorted({rows[n][1] for n in members})
         if len(cats) > 1:
             problems.append(f"{group}: members disagree on category {cats}")
+        if installed is not None and group in prefer:
+            here = sorted(n for n in members if n in installed)
+            # No member installed means the group is irrelevant on this host, not broken.
+            if here and prefer[group] not in installed:
+                problems.append(f"{group}: preferred {prefer[group]!r} is not installed; "
+                                f"prefer an installed member instead: {', '.join(here)}")
 
     for p in problems:
         print(p)
@@ -94,6 +115,12 @@ def check(path):
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else (
+    args = sys.argv[1:]
+    have = None
+    if "--installed" in args:
+        i = args.index("--installed")
+        have = installed_set(args[i + 1]) if i + 1 < len(args) else set()
+        del args[i:i + 2]
+    target = args[0] if args else (
         Path(__file__).resolve().parent.parent / "references" / "skill-notes.md")
-    sys.exit(check(target))
+    sys.exit(check(target, have))

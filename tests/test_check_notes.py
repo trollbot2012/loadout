@@ -100,7 +100,38 @@ def test_missing_file_fails_cleanly(tmp_path):
     assert r.returncode == 2 and "not found" in (r.stdout + r.stderr)
 
 
-def test_shipped_notes_file_is_valid():
-    """The table this repo actually ships must satisfy every rule."""
-    r = run(REPO / "references" / "skill-notes.md")
+def test_preferred_skill_absent_on_this_machine_falls_back(tmp_path):
+    """A table is generated on one machine. Where its preferred skill is not installed here,
+    the check names the installed member to use instead rather than the absent one."""
+    r = subprocess.run([sys.executable, str(CHECK), str(notes(tmp_path, GOOD)),
+                        "--installed", "cursor-delegate,planning-with-files"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 1
+    assert "codex-delegate" in r.stdout and "not installed" in r.stdout
+    assert "cursor-delegate" in r.stdout.split("not installed", 1)[1]
+
+
+def test_group_with_no_installed_member_is_not_reported(tmp_path):
+    """The delegate group is simply irrelevant on a host with none of its skills."""
+    r = subprocess.run([sys.executable, str(CHECK), str(notes(tmp_path, GOOD)),
+                        "--installed", "planning-with-files"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout
+
+
+def test_installed_accepts_a_file(tmp_path):
+    lst = tmp_path / "installed.txt"
+    lst.write_text("cursor-delegate\nplanning-with-files\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, str(CHECK), str(notes(tmp_path, GOOD)),
+                        "--installed", str(lst)], capture_output=True, encoding="utf-8")
+    assert r.returncode == 1 and "not installed" in r.stdout
+
+
+def test_local_notes_file_is_valid_when_present():
+    """The table is machine-local and gitignored, so a clone may not have one."""
+    import pytest
+    target = REPO / "references" / "skill-notes.md"
+    if not target.is_file():
+        pytest.skip("no local skill-notes.md generated")
+    r = run(target)
     assert r.returncode == 0, r.stdout + r.stderr

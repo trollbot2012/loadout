@@ -83,6 +83,11 @@ Rules:
 - **Notes table**: if `references/skill-notes.md` exists next to this SKILL.md, a skill's
   row there (category, overlap group, prefer/avoid, tier) overrides the scanned
   description. Skills without a row follow the rule above.
+- **The listing decides what exists; the table only describes it.** A table is generated
+  on one machine, so recommend a skill only when step 1 listed it for the current host.
+  Where a group's preferred skill is absent, name the best member the listing does have;
+  where a row has no matching entry in the listing at all, it describes another machine —
+  pass over it. `scripts/check_notes.py --installed <names>` reports these before you start.
 - **Recommend 3–7 core skills, not 30.** Situational skills are extra but keep
   them few. An unused skill is noise; the value of this audit is subtraction.
   Pick the single best skill per needed category.
@@ -259,9 +264,11 @@ with no preferred skill still renders as a valid table. Validate it after any ed
 python3 "<this-skill-dir>/scripts/check_notes.py"
 ```
 
-It checks only what the file can prove (categories, tiers, duplicates, one preferred skill
-per overlap group, no instruction-shaped cells). Which skills are installed differs per
-machine, so a missing row is not something it can detect; `scan.py` reports what is installed.
+It checks categories, tiers, duplicates, one preferred skill per overlap group, and that no
+cell reads as an instruction. Add `--installed <names>` (a comma list, or a file with one name
+per line) to check the table against a machine as well: it reports every group whose preferred
+skill is not installed there and names the installed member to use instead. The table itself is
+machine-local and gitignored, since it is generated from one machine's skill bodies.
 
 ## Notes for specific hosts
 
