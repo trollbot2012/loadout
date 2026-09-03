@@ -34,7 +34,8 @@ export const name = 'loadout-gate';
 const SAFE = new Set(['read', 'glob', 'grep', 'todo_write', 'skill']);
 const GATE_TIMEOUT_MS = 20000;
 /** dsh renders a loaded skill as <skill_content name="…">; that is the authoritative load record. */
-const SKILL_LOADED = /<skill_content\s+name="([^"]+)"/;
+// the result is stringified before matching, so the quotes may arrive escaped as name=\"x\"
+const SKILL_LOADED = /<skill_content\s+name=\\?"([^"\\]+)/;
 
 /** One ledger per process, so a second load of this plugin cannot start a fresh, empty one. */
 const LEDGER = (globalThis.__loadoutGateLedger ??= { events: [] });

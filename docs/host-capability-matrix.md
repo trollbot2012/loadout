@@ -28,7 +28,7 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 | Grok Build | hard (fail-open on timeout) | none (Stop passive) | `updates.jsonl` | **unverified** (reads `.claude/settings.json`; not proven live) |
 | Crush | hard (PreToolUse only, exit 49 halts) | none | SQLite | not started |
 | Continue CLI | hard (undocumented) | undocumented | `~/.continue/sessions/*.json` | not started |
-| DeepSeek Harness | hard (`tools/pre-execute` waterfall returns `{kind:'deny',reason}`) | **not established**: no typed veto; the plugin forces continuation via `agent.steer()`, so an adapter failure fails open | native `skill` tool + `tool/call` rows; on-disk log is multi-frame zstd | **runtime proof blocked** (no reachable model backend on this machine; implementation stopped 2026-09-03) |
+| DeepSeek Harness | hard (`tools/pre-execute` returns `{kind:'deny',reason}`) | hard, but the PLUGIN enforces it (`agent.steer()`); every adapter failure path is fail-closed, proven by induced-error tests | native `skill` tool result marker + the plugin's live event stream | **proven** 2026-09-03 (gate_dsh, v1.6.0) — model scripted, see below |
 
 ## Per-host detail
 
@@ -91,9 +91,7 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 
 ### DeepSeek Harness (verified from source 2026-09-03, dsh 0.1.1-rc.2)
 
-Read from the installed tree, not from docs: `%LOCALAPPDATA%\Programs\DeepSeek Harness
-esourcespp
-ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
+Read from the installed tree, not from docs: `%LOCALAPPDATA%/Programs/DeepSeek Harness/resources/app/node_modules/@deepseek-ai/` (196 unminified ESM packages; the API catalog with signatures is `dsh-tool-cordis/lib/index.js`).
 
 - **Pre-tool denial — meets the contract.** Event `tools/pre-execute`, waterfall mode
   (`dsh-tool-cordis/lib/index.js:4305-4307`). A listener returns
@@ -111,9 +109,10 @@ ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with si
   disablement policy. But the failure mode differs from Claude Code and Codex in a way that blocks
   any equivalence claim: there the host enforces the block, so a broken gate still fails safe; here
   the plugin forces continuation itself, so a plugin that throws, times out, or is skipped lets the
-  turn end silently. Calling this equivalent requires one of two things, neither of which has been
-  done: a demonstration that an induced adapter failure still fails closed, or an explicit decision
-  to accept the weaker behaviour on this host.
+  turn end silently. That is why equivalence needed proving rather than arguing, and on 2026-09-03 it
+  was: induced-error runs show both failure classes — a missing gate binary and a fault raised inside
+  the gate — denying the tool call and holding the turn open. The adapter is written so that every
+  path through it, including its own exception handlers, denies and steers.
 - **Skill invocation — meets the contract, and is the strongest signal of any host.** A native
   model-facing `skill` tool takes `{name}` and resolves through the skills registry rather than the
   `read` tool (`dsh-tool-skill/lib/index.js:37-135`); roots are `<project>/.dsh/skills`,
@@ -145,23 +144,32 @@ ode_modules\@deepseek-ai\` (196 unminified ESM packages; the API catalog with si
   waterfall, so a plugin can spawn and await the Python gate and return its decision. Note
   `ctx.subprocess` scrubs `DSH_*`/secret environment from children
   (`dsh-subprocess/lib/index.js:26-44, 52-85`).
-- **Headless proof path exists but could not be exercised**: `dsh --profile headless "<task>"` answers
-  one task and exits. All three configured providers are local endpoints; on 2026-09-03 two
-  (`:18090`, `:8080`) were not listening and the third (`:18093`) accepted TCP but never answered
-  HTTP — `/v1/models` failed and a minimal completion hung for 91 s. No dsh task can complete, so
-  the live proof is blocked on infrastructure, not on the design.
+- **Proof (headless `dsh --profile headless`, 2026-09-03).** The rig changes nothing in the operator's
+  `~/.dsh`: the stock `headless` profile plus a `--patch` overlay that inserts the plugin by `file://`
+  URL and redirects the settings file to a copy (`- id: settings` / `config.path`). The model is a
+  deterministic local OpenAI-compatible provider, because the only reachable real model (Ollama
+  `qwen3:8b`, CPU-pinned — this box's CUDA backend fails PTX JIT) would not emit tool calls inside
+  dsh's agentic prompt. Everything downstream of the model is real: dsh dispatches the tool, the
+  plugin sees it, the Python gate decides.
+  - **Deny before stage 1**: the write never happened and the model received
+    `Error: Loadout gate: invoke \`planning-with-files\` (planning) before editing.`
+  - **Allow after a real load, then block**: with the skill loaded the write succeeded
+    (`notes.txt` written, harness reported `Updated file`), and the turn was then held open for 3701
+    model turns until the external timeout, because the review stage was never loaded.
+  - **Fail closed, spawn class** (gate binary missing): `pre-execute failed, denying (fail closed)`
+    and `turn-stopping failed, blocking anyway (fail closed)`; 9962 fail-closed decisions, held open
+    to the timeout.
+  - **Fail closed, internal class** (a fault raised inside `decide`): the model received
+    `Error: Loadout gate: the gate hit an internal error, so this is denied rather than allowed
+    (fail closed).`, and the turn was held open.
+- **What the scripted model does and does not prove.** It proves the adapter: dispatch, denial,
+  the ledger, the steer loop and both failure classes, deterministically. It does not prove anything
+  about a particular model's willingness to comply — but the gate never depended on that.
+- **Residual gap, stated plainly.** These failure paths cover a gate that breaks *while loaded*. If
+  the plugin never loads at all (a bad `cordis.patch.yml`, a `dsh` upgrade that moves the loader),
+  nothing enforces — the same hole every host has when its hook is not registered. dsh makes it
+  easier to hit because there is no trust gate and no per-repo config to notice.
 
-**Proven live on 2026-09-03, before the blocker (registration only):** a plain `.mjs` plugin loads
-into the headless profile through a `--patch` overlay naming it by `file://` URL, with no pnpm and
-no package.json; its `apply()` ran and `agent/pre-step` fired with real payloads. The settings file
-can also be redirected with `- id: settings
-  config: {path: <copy>}`, so an adapter never needs to
-modify the operator's own `settings.yaml`. Nothing was left registered: the profile's
-`cordis.patch.yml` is back to `[]` and the probe module was removed.
-
-**Status: implementation stopped.** Resume when a model backend answers; the remaining work is the
-plugin plus its Python side, and the equivalence question above must be settled before the row can
-claim more than `runtime proof blocked`.
 
 ## Adapter checklist (per host)
 

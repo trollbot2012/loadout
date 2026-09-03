@@ -1,6 +1,6 @@
 # DeepSeek Harness (dsh) adapter for the enforcement gate
 
-Date: 2026-09-03 | Status: implementation complete, live proof in progress | Target: loadout v1.6.0 | Matrix row: docs/host-capability-matrix.md
+Date: 2026-09-03 | Status: proven live 2026-09-03 | Target: loadout v1.6.0 | Matrix row: docs/host-capability-matrix.md
 
 ## Goal
 
@@ -140,3 +140,37 @@ Three runs, headless, transcript/ledger and file state inspected afterwards:
 
 Every other host (Qwen Code, Gemini CLI, Copilot CLI, zcode, Hermes, Cursor, Mistral Vibe,
 OpenCode, Grok Build, Crush, Continue CLI).
+
+## Live proof results (2026-09-03)
+
+The rig is the one described above: stock `headless` profile, a `--patch` overlay that inserts the
+plugin by `file://` URL and redirects the settings file to a copy, so the operator's `~/.dsh` is
+untouched. The model is a deterministic local OpenAI-compatible provider; the only reachable real
+model (Ollama `qwen3:8b`, CPU-pinned because this box's CUDA backend fails PTX JIT) would not emit
+tool calls inside dsh's agentic prompt. Everything downstream of the model is real dsh.
+
+| Run | Result |
+|---|---|
+| No skill loaded | The write never happened; the model got `Error: Loadout gate: invoke \`planning-with-files\` (planning) before editing.` |
+| Skill loaded, review missing | The write succeeded (harness reported `Updated file`); the turn was then held open for 3701 model turns until the external timeout |
+| Gate binary missing | `pre-execute failed, denying (fail closed)` and `turn-stopping failed, blocking anyway (fail closed)`; 9962 fail-closed decisions, held open to the timeout |
+| Fault raised inside `decide` | The model got `Error: Loadout gate: the gate hit an internal error, so this is denied rather than allowed (fail closed).`; turn held open |
+
+Both induced-error classes therefore fail closed, which is what the equivalence claim was gated on.
+
+Two things this does not cover. A scripted model proves the adapter, not a particular model's
+willingness to comply — the gate never depended on that. And these paths cover a gate that breaks
+while loaded: if the plugin never loads at all, nothing enforces, which is true of every host whose
+hook is not registered, and easier to hit on dsh because there is no trust gate and no per-repo
+config to notice.
+
+## Debugging notes worth keeping
+
+- `pkill` does not reach native Windows processes. Eighteen stale stub providers held port 18099 and
+  served the wrong script, which invalidated two full proof runs before it was spotted; kill by PID
+  from `netstat -ano` plus `taskkill`, and check the port is free before trusting a run.
+- Denials reach the model as tool results, not on stderr. Grepping the harness's stdout/stderr for
+  the deny text finds nothing and reads as a pass; the provider's view of the conversation is the
+  place to assert.
+- `JSON.stringify` escapes the quotes in the harness's `<skill_content name="…">` marker, so the
+  plugin's regex has to accept `name=\"…\"` as well as `name="…"`.
