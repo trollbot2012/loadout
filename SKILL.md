@@ -174,7 +174,8 @@ On accept, make it stick — three actions:
    stop while a binding stage (any Accepted line not labelled `situational`) was never
    invoked. Tell the user in one sentence that the gate takes effect from the next
    session; on every other host say the wiring is prose only. Pass `--no-enforce` only
-   if the user asks for prose-only wiring.
+   if the user asks for prose-only wiring. On Codex the gate is off unless the user asks
+   for it explicitly (`--enforce-codex`); say the wiring is prose only there too.
 
    If Python is unavailable, do the same by
    hand with this block, replacing any existing `## Loadout` section:
@@ -242,11 +243,13 @@ exits 1 when any copy is stale or missing.
   disk view may include skills not loaded in this session and vice versa. Prefer
   the in-session skill list for "what can I invoke right now", the scanner for
   "what is installed on this machine" and for the off/on markers.
-  The enforcement gate exists for Claude Code and Codex CLI in this version (Codex: user-level
-  `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next session; on Codex a
-  skill counts as invoked only when its SKILL.md is actually read, and there is no block cap, so a
-  stuck session is ended by the operator, not the gate; other hosts are prose only until
-  `docs/host-capability-matrix.md` says proven). Operator hatch:
+  The enforcement gate is registered automatically for Claude Code only. Codex is supported but
+  **off by default** — it needs an explicit `--enforce-codex`, because on Codex 0.152.1 a registered
+  gate crashed the desktop app's app-server ~20s after every launch (see README). With that flag it
+  writes the user-level `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next
+  session; on Codex a skill counts as invoked only when its SKILL.md is actually read, and there is
+  no block cap, so a stuck session is ended by the operator, not the gate. Other hosts are prose only
+  until `docs/host-capability-matrix.md` says proven. Operator hatch:
   `LOADOUT_ENFORCE=0` or remove LOADOUT.md; there is no agent-side override, and
   writes to LOADOUT.md, AGENTS.md or CLAUDE.md are gated like any other edit (only an
   exact `apply.py` invocation passes as a re-bootstrap). Ceilings: Claude Code overrides

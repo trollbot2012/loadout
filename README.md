@@ -70,7 +70,12 @@ because that host overrides the hook itself at that point (the count comes from 
 nothing on disk, so a fresh session inherits nothing); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
-Codex CLI: `apply.py --host codex` registers the same gate in the user-level `~/.codex/hooks.json`
+Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 a registered gate crashed
+the desktop app's `app-server` child (hard abort about 20s after every launch, no respawn, every
+request then failing with "Codex app-server process is not available"); a schema-correct nested
+entry did it as readily as the malformed root-level one an older version wrote, so the cause is not
+yet understood and the wiring stays prose-only unless asked for. With the flag,
+`apply.py --host codex --enforce-codex` registers the gate in the user-level `~/.codex/hooks.json`
 and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads
 the rollout transcript, treats `apply_patch` as an edit, and counts a skill as invoked only when the
 agent actually reads its SKILL.md (a `$name` mention is intent, not invocation). Codex has no

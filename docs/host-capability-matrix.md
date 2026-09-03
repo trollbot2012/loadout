@@ -16,7 +16,7 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 | Host | Pre-tool deny | Stop block | Ledger source | Proof status |
 |---|---|---|---|---|
 | Claude Code | hard | hard (host cap 8) | `transcript_path` JSONL | **proven** 2026-09-02 (gate.py v1.4.0) |
-| Codex CLI | hard | hard (no host cap; gate never yields, operator ends it) | rollout JSONL via `transcript_path` (pre) / session id (stop) | **proven** 2026-09-02 (gate_codex, v1.5.0) |
+| Codex CLI | hard | hard (no host cap; gate never yields, operator ends it) | rollout JSONL via `transcript_path` (pre) / session id (stop) | **opt-in only** (`--enforce-codex`): proven 2026-09-02 for headless `codex exec` (gate_codex, v1.5.0). Codex 0.152.1 aborted while a gate was registered, but the dumps carry no trace of the gate and upstream sees the same fault with no hooks — opt-in is caution, not a verdict; see the crash investigation below |
 | Qwen Code | hard | hard | `transcript_path` JSONL | not started |
 | Gemini CLI | hard | hard (re-prompt) | `transcript_path` | not started |
 | Copilot CLI | hard (timeout fails open) | hard (cap 8) | `session-state/<id>/events.jsonl` (schema undocumented) | not started |

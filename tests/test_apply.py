@@ -330,20 +330,21 @@ def test_codex_invalid_hooks_json_is_an_error_before_any_write(tmp_path, codex_h
     codex_hooks.parent.mkdir(parents=True)
     codex_hooks.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match="hooks.json"):
-        apply.apply(tmp_path, "codex")
+        apply.apply(tmp_path, "codex", enforce_codex=True)
     assert not (tmp_path / "AGENTS.md").exists()
 
 
 def test_codex_host_writes_agents_md_and_user_hooks(tmp_path, codex_hooks):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
-    res = apply.apply(tmp_path, "codex")
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
     assert res["AGENTS.md"] == "created" and set(res) == {"AGENTS.md", "~/.codex/hooks.json"}
     assert res["~/.codex/hooks.json"].startswith("created" + CODEX_NOTE)
     assert codex_hooks.is_file() and not (tmp_path / ".claude").exists()
     assert_codex_schema_valid(json.loads(codex_hooks.read_text(encoding="utf-8")))
-    assert apply.apply(tmp_path, "codex")["~/.codex/hooks.json"].startswith("unchanged; trust already present")
-    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False)
-    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "claude-code")
+    assert apply.apply(tmp_path, "codex", enforce_codex=True)["~/.codex/hooks.json"].startswith(
+        "unchanged; trust already present")
+    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False, enforce_codex=True)
+    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "claude-code", enforce_codex=True)
 
 
 # ---------------------------------------------------------------- codex hook trust
@@ -410,7 +411,7 @@ def test_trust_codex_gate_keys_match_nested_positions_not_root(tmp_path):
 def test_apply_codex_grants_trust(tmp_path, monkeypatch):
     monkeypatch.setattr(apply, "CODEX_CONFIG", tmp_path / "codex-home" / "config.toml")
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
-    res = apply.apply(tmp_path, "codex")
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
     assert "trust granted" in res["~/.codex/hooks.json"] and "skipped" not in res["~/.codex/hooks.json"]
     assert (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8").count("trusted_hash") == 2
 
@@ -519,3 +520,65 @@ def test_dsh_no_enforce_and_other_hosts_skip_registration(tmp_path, dsh_patch, c
     assert not dsh_patch.exists()
     assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "codex")
     assert not dsh_patch.exists()
+def test_trust_codex_gate_drops_its_own_stale_entries_when_the_gate_moves(tmp_path):
+    """Regression: trust keys are positional (<event>:<group>:<handler>), but the gate is re-found by
+    its "gate.py" command. When another hook is added ahead of it the gate moves, and the entry left at
+    the old index silently squats a foreign handler -- reporting our hash for their command, which Codex
+    then reads as "modified since last trusted" and refuses to run. Observed live on 2026-09-02: the
+    gate's hash sat on `pre_tool_use:0:0` (devteam-codex) and `stop:0:0` (an ADE notify hook)."""
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    first = cfg.read_text(encoding="utf-8")
+    gate_pre = f"[hooks.state.'{hooks}:pre_tool_use:0:0']"
+    gate_stop = f"[hooks.state.'{hooks}:stop:0:0']"
+    assert gate_pre in first and gate_stop in first
+
+    # a foreign hook is added ahead of ours in both events: the gate shifts to index 1
+    foreign = {"hooks": [{"type": "command", "command": "devteam-codex hook", "timeout": 10}]}
+    data = json.loads(hooks.read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "Stop"):
+        data["hooks"][event].insert(0, json.loads(json.dumps(foreign)))
+    hooks.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    assert apply.trust_codex_gate(hooks, cfg) == "trusted"
+    text = cfg.read_text(encoding="utf-8")
+    assert f"[hooks.state.'{hooks}:pre_tool_use:1:0']" in text, "the gate is trusted at its new index"
+    assert f"[hooks.state.'{hooks}:stop:1:0']" in text
+    assert gate_pre not in text, "our stale entry must not be left squatting the foreign handler"
+    assert gate_stop not in text
+    assert text.count("trusted_hash") == 2
+
+
+def test_trust_codex_gate_prunes_its_entries_when_the_gate_is_gone(tmp_path):
+    """Removing the gate from hooks.json must take its trust entries with it, so a later hook that
+    lands on the freed index is not pre-judged against our hash. Foreign entries are never touched."""
+    hooks, cfg = tmp_path / "hooks.json", tmp_path / "config.toml"
+    apply.register_codex_gate(hooks)
+    keep = "[hooks.state.'D:/other/hooks.json:stop:0:0']\ntrusted_hash = \"sha256:keep\"\n"
+    cfg.write_text(keep, encoding="utf-8")
+    apply.trust_codex_gate(hooks, cfg)
+    assert cfg.read_text(encoding="utf-8").count("trusted_hash") == 3
+
+    hooks.write_text(json.dumps({"hooks": {}}, indent=2), encoding="utf-8")
+    apply.trust_codex_gate(hooks, cfg)
+    text = cfg.read_text(encoding="utf-8")
+    assert "sha256:keep" in text, "another file's entry is not ours to remove"
+    assert f"{hooks}:pre_tool_use" not in text and f"{hooks}:stop" not in text
+    assert text.count("trusted_hash") == 1
+
+
+def test_codex_gate_is_opt_in(tmp_path, codex_hooks):
+    """Registering the gate in ~/.codex/hooks.json crashed the Codex desktop app-server on
+    0.152.1 (hard abort ~20s after every launch, no respawn), with a schema-correct nested
+    entry just as much as with the malformed one. Until that is understood, --host codex
+    wires the prose section only; the gate needs an explicit --enforce-codex."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "codex")
+    assert set(res) == {"AGENTS.md"}
+    assert not codex_hooks.exists(), "the user's hooks.json is not touched without an opt-in"
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert res["~/.codex/hooks.json"].startswith("created" + CODEX_NOTE)
+    assert codex_hooks.is_file()
+    # --no-enforce still wins over the opt-in
+    assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False, enforce_codex=True)
