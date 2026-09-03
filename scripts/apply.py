@@ -45,11 +45,51 @@ def gate_hooks():
 def codex_gate_hooks():
     """Same gate for Codex CLI, in its Claude-shaped hooks.json. No PreToolUse matcher: Codex tool names
     differ from Claude's, so the gate decides by name itself. Codex runs hooks through PowerShell on
-    Windows, where a quoted path at command position needs the call operator; bash takes the plain form."""
+    Windows, where a quoted path at command position needs the call operator; bash takes the plain form.
+    Event names are keys of the map returned here; the caller nests it under the file's root "hooks"
+    object -- Codex's schema accepts only "description"/"hooks" at the root. commandWindows (camelCase)
+    is the canonical field Codex itself writes; codex_hook_hash() still tolerates the old snake_case
+    form when reading, but we only ever write the canonical one."""
     def entry(mode):
         posix = f'"{sys.executable}" "{GATE}" {mode} --host codex'
-        return {"hooks": [{"type": "command", "command": posix, "command_windows": "& " + posix, "timeout": 20}]}
+        return {"hooks": [{"type": "command", "command": posix, "commandWindows": "& " + posix, "timeout": 20}]}
     return {"PreToolUse": [entry("pre")], "Stop": [entry("stop")]}
+
+
+def _all_gate_entries(entries):
+    """True when every handler across every group in `entries` is one of this repo's own gate hooks
+    (identified the same way upsert_hooks does: the "gate.py" command substring). An entries list with
+    no handlers at all (junk/empty) counts as all-gate too -- there is nothing foreign to protect."""
+    for group in entries:
+        if not isinstance(group, dict):
+            return False
+        for h in group.get("hooks", []):
+            if not isinstance(h, dict) or "gate.py" not in h.get("command", ""):
+                return False
+    return True
+
+
+def _migrate_stray_root_events(data):
+    """Codex's hooks.json root accepts ONLY "description"/"hooks" -- any other root key fails to load
+    every hook in the file, not just an invalid one. An earlier version of this writer put the gate's
+    event entries straight at the root; move any such stray root key that holds ONLY our own gate
+    entries under "hooks", deleting the now-empty root key. A stray root key holding any entry that is
+    NOT ours is left completely untouched (it is not our data to move or delete) and its name is
+    returned so the caller can report it. Mutates `data` in place; returns (foreign_keys, moved_any)."""
+    foreign = []
+    moved = False
+    for key in [k for k in data if k not in ("description", "hooks")]:
+        entries = data[key]
+        if not isinstance(entries, list):
+            continue
+        if _all_gate_entries(entries):
+            if entries:
+                data.setdefault("hooks", {}).setdefault(key, []).extend(entries)
+            del data[key]
+            moved = True
+        else:
+            foreign.append(key)
+    return foreign, moved
 
 
 def load_settings(path):
@@ -97,11 +137,17 @@ def register_gate(project, data=None):
 
 
 def register_codex_gate(path=None, data=None):
-    """Upsert the gate hooks into the user-level Codex hooks.json (events live at the top level)."""
+    """Upsert the gate hooks into the user-level Codex hooks.json, nested under the root "hooks" object
+    (Codex's schema; see _migrate_stray_root_events for why root-level event keys are never written)."""
     path = Path(path or CODEX_HOOKS)
     existed = path.is_file()
     data = load_settings(path) if data is None else data
-    return write_hooks(path, data, existed, upsert_hooks(data, codex_gate_hooks()))
+    foreign, moved = _migrate_stray_root_events(data)
+    changed = upsert_hooks(data.setdefault("hooks", {}), codex_gate_hooks()) or moved
+    action = write_hooks(path, data, existed, changed)
+    if foreign:
+        action += f"; WARNING: root-level {', '.join(sorted(foreign))} left as-is (holds non-gate entries)"
+    return action
 
 
 # Codex skips hooks it has not been told to trust, silently. Trust is a per-handler hash in
@@ -148,9 +194,10 @@ def trust_codex_gate(hooks_path=None, config_path=None):
     hooks_path = Path(hooks_path or CODEX_HOOKS)
     config_path = Path(config_path or CODEX_CONFIG)
     data = load_settings(hooks_path)
+    events = data.get("hooks", {}) if isinstance(data.get("hooks"), dict) else {}
     wanted = {}
     for json_key, label in _CODEX_EVENT_LABEL.items():
-        for gi, group in enumerate(data.get(json_key, [])):
+        for gi, group in enumerate(events.get(json_key, [])):
             for hi, handler in enumerate(group.get("hooks", [])):
                 if "gate.py" in handler.get("command", ""):
                     wanted[f"{hooks_path}:{label}:{gi}:{hi}"] = codex_hook_hash(label, group, handler)
