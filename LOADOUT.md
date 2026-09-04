@@ -1,43 +1,54 @@
 # Loadout: loadout
 Harness: claude-code | Project type: CLI/library (stdlib Python scanner + portable SKILL.md), maintenance + refinement, cross-harness portability is the special need
-Date: 2026-09-02
+Date: 2026-09-03
+Enforcement: claude-code gate registered
+Supersedes: loadout of 2026-09-02
+
+## What changed since 2026-09-02
+- v1.2.2 -> v1.5.x: Codex and DeepSeek Harness adapters merged, 22 -> 115 tests. Project type and needs unchanged; workflow carried over.
+- First task: skill-notes reference. Loadout classifies from frontmatter descriptions only (scan.py MAX_DESC, SKILL.md step 3); thin or empty descriptions (e.g. `devteam` prints none) give it nothing to classify by. Fix: step-3 rule change (read the body when the description is thin, prefer a notes row when one exists), generated `references/skill-notes.md`, add it to SKILL_FILES for self-install, re-sync.
 
 ## Recommended workflow
-1. Planning → `planning-with-files` — the project already keeps task_plan.md / findings.md / progress.md; keep using them (they are stale, see Findings)
-2. Skill authoring → `superpowers:writing-skills` — every SKILL.md edit is a skill edit; test the prose with a subagent before shipping
-3. Debugging → `superpowers:systematic-debugging` — one real defect found (LOADOUT_HOST override), root-cause it, do not patch brief mode
-4. Implementation → `superpowers:test-driven-development` — 22 pytest tests on a 3.9/3.11/3.13 × ubuntu/windows CI matrix; failing test first
-5. Review → `code-review` — Standards + Spec axes since a fixed commit; git + origin present so it is not blocked
-6. Finish → `superpowers:verification-before-completion` then `superpowers:finishing-a-development-branch` — run `--check`, tests, and re-sync copies with `--self-install` before calling a version done
+1. Planning → `planning-with-files` — task_plan.md / progress.md exist and are stale again; refresh with this task
+2. Skill authoring → `superpowers:writing-skills` — the step-3 edit and the reference file are skill edits; test the prose with a subagent
+3. Debugging → `superpowers:systematic-debugging` — only if the rule change misbehaves
+4. Implementation → `superpowers:test-driven-development` — one failing test: `--self-install` copies references/skill-notes.md and `--check` flags it stale
+5. Review → `code-review` — Standards + Spec since db2a5da
+6. Finish → `superpowers:verification-before-completion` then `superpowers:finishing-a-development-branch` — tests, `--check`, `--self-install`
 
 ## Situational (invoke when relevant)
-- `unlazy` — for a multi-step version bump; this repo already uses its GATES.md pattern
-- `ponytail:ponytail-review` — on the diff before review; ponytail is already always-on via SessionStart hook
+- `superpowers:dispatching-parallel-agents` — fan out subagents over the ~119 skill dirs to generate notes rows
+- `unlazy` — multi-step gated work; the repo already uses GATES.md
 - `loopy` — if the re-audit + re-sync cycle becomes a repeatable loop
-- `loadout` — re-run on itself after each version (dogfood); this file then gets a Supersedes line
+- `loadout` — re-run on itself after each version (dogfood)
 
 ## Skip / noise for this project
-- `plan-blueprint-tdd`, `lazy-planner`, `superpowers:brainstorming` — greenfield planners; this is v1.2.2 maintenance
-- `write-a-skill`, `anthropic-skills:skill-creator` — redundant with superpowers:writing-skills; pick one
-- `full-output-enforcement` — conflicts with the always-on ponytail hook (minimal output vs exhaustive)
-- all `*-delegate` skills, `superpowers:dispatching-parallel-agents`, `superpowers:subagent-driven-development` — 900-line project, nothing to parallelise
+- `plan-blueprint-tdd`, `lazy-planner`, `superpowers:brainstorming` — greenfield planners; this is maintenance
+- `write-a-skill`, `anthropic-skills:skill-creator` — redundant with superpowers:writing-skills
+- `full-output-enforcement` — conflicts with the always-on ponytail hook
+- `ponytail:ponytail-review` — dropped this audit; ponytail is already always-on via SessionStart
+- all `*-delegate` skills, `superpowers:subagent-driven-development` — small repo, only the notes generation parallelises and dispatching-parallel-agents covers it
 - all frontend/design skills (design-taste-*, gpt-taste, brandkit, imagegen-*, figma:*, frontend-design, minimalist-ui, industrial-brutalist-ui, redesign-existing-projects, high-end-visual-design, image-to-code) — no UI
-- `agent-reach`, `research`, `context7-mcp` — stdlib only, no external docs needed
-- mantis-* — security-audit pipeline; the scanner reads names/frontmatter only, no trust boundary worth a campaign
+- `agent-reach`, `research`, `context7-mcp` — stdlib only; upstream lookups for skill-notes are a grep for github URLs in local files, not research
+- mantis-* — no trust boundary worth a campaign
 - `commit-commands:*`, `feature-dev:*`, `claude-md-management:*` — off in this host
 
 ## Blocked
-- none (git repository present, origin/main in sync, Python available)
+- none (git repository present, origin/main in sync, Python available, 115 tests green)
 
 ## Gaps
-- none by category. Process gap only: no changelog; version history lives in git subjects and a stale progress.md
+- none by category. Process gap carried over: no changelog
 
-## Findings (defects and improvements in the skill itself, from this audit)
-1. DEFECT `LOADOUT_HOST` is used verbatim, never normalised to a host key. `LOADOUT_HOST=claude` (the obvious value; SKILL.md says only `<host>`) makes `--brief` drop the current-host section entirely and makes the full run render claude-code as a foreign host (names only, `…+78`). Fix in detect_host: map aliases (claude→claude-code, dsh→deepseek, …), warn and fall back to `unknown` on an unrecognised value; document the valid names in SKILL.md and README.
-2. `--brief` is not brief: 118 skills still print 118 lines at 200 chars each. SKILL.md tells the model to use it above ~50 skills, so it should drop to name + first sentence.
-3. Two native-file tables (scan.py NATIVE_FILES, apply.py NATIVE) can drift; apply.py sits next to scan.py and can import it.
-4. GATES.md G10 greps for `deepseek-harness`, a host name that no longer exists (now `deepseek`); the gate would fail today. task_plan.md ended at "Done" before v1.1.0 and progress.md at v1.1.0 while the repo was at v1.2.2. They are gitignored (local notes only), so this is a bookkeeping gap, not a public one. Updated in the v1.3.0 pass.
-5. Non-current hosts list hooks as bare event names (`SessionStart, SessionStart, …`); the current-host rendering (matcher + command + source) is good and could be reused with a shorter form.
+## Findings (carried forward from the 2026-09-02 audit, with current status)
+1. FIXED `LOADOUT_HOST` was used verbatim, never normalised to a host key. `HOST_ALIASES` now maps claude -> claude-code, dsh -> deepseek and falls back to `unknown` (scan.py:102, applied at :400).
+2. FIXED `--brief` printed every description in full. It now emits the first sentence only (scan.py:659).
+3. OPEN Two native-file tables can drift: `NATIVE_FILES` (scan.py:71) and `NATIVE` (apply.py:32) hold the same map. apply.py sits next to scan.py and can import it.
+4. FIXED GATES.md G10 grepped for the retired host name `deepseek-harness`; it now checks that `~/.agents` appears as a host.
+5. FIXED Non-current hosts listed hooks as bare event names; `test_foreign_host_hooks_are_collapsed_with_counts` covers the collapsed rendering.
+
+## Findings (new, this audit)
+6. FIXED (this change) Step 3 classified from the frontmatter description alone. Across 162 installed skills the shortest description is 14 characters and 55 are under 80, so a skill could not describe its own value. Step 3 now reads the body when a description is thin and prefers a `references/skill-notes.md` row when one exists.
+7. OPEN A plugin bundle installed under `skills/` (for example `devteam`) has no top-level SKILL.md, so the scanner lists a bare name with no description at all. The notes table carries a row for it; the scanner could instead recurse one level into `<bundle>/skills/`.
 
 ## Accepted
 - planning: `planning-with-files`
@@ -47,7 +58,7 @@ Date: 2026-09-02
 - review: `code-review`
 - verify: `superpowers:verification-before-completion`
 - finish: `superpowers:finishing-a-development-branch`
+- situational, notes-table fan-out: `superpowers:dispatching-parallel-agents`
 - situational, gated multi-step work: `unlazy`
-- situational, diff review: `ponytail:ponytail-review`
 - situational, repeatable cycle: `loopy`
 - situational, self re-audit: `loadout`

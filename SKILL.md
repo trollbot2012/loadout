@@ -77,6 +77,17 @@ by what its description says it does, not its name:
 | Output/style modifiers | Per user preference |
 
 Rules:
+- **Thin description**: if a scanned description is empty, under about 80 characters, or
+  names no task, read that skill's SKILL.md body before classifying. The description is
+  what the host triggers on; the body is what the skill does.
+- **Notes table**: if `references/skill-notes.md` exists next to this SKILL.md, a skill's
+  row there (category, overlap group, prefer/avoid, tier) overrides the scanned
+  description. Skills without a row follow the rule above.
+- **The listing decides what exists; the table only describes it.** A table is generated
+  on one machine, so recommend a skill only when step 1 listed it for the current host.
+  Where a group's preferred skill is absent, name the best member the listing does have;
+  where a row has no matching entry in the listing at all, it describes another machine —
+  pass over it. `scripts/check_notes.py --installed <names>` reports these before you start.
 - **Recommend 3–7 core skills, not 30.** Situational skills are extra but keep
   them few. An unused skill is noise; the value of this audit is subtraction.
   Pick the single best skill per needed category.
@@ -85,8 +96,14 @@ Rules:
 - **Flag conflicts**: skills whose instructions fight each other (e.g. a
   minimalism skill vs. a full-output skill; two competing planning systems).
   Hooks that inject always-on instructions count as parties to a conflict.
-- **Flag gaps**: needed category with no installed skill → suggest what to install
-  and where it comes from, but do not install without being asked.
+- **Two lists, different things**: the numbered workflow is a list of installed
+  skills, one skill per stage — these become the `## Accepted` stages and are the
+  only lines the enforcement gate can observe. Capabilities is a list of connected
+  MCP servers with the category each one serves; the agent calls these directly, so
+  they carry no stage number. Read the report's `## MCP servers` section for them.
+- **Flag gaps**: a category counts as covered when either a skill or an MCP server
+  serves it. Record a gap only where neither does → suggest what to install and
+  where it comes from, but do not install without being asked.
 - **Flag blocked**: a recommended skill the project state prevents from running
   (no git repo for a review skill, no tracker for a ticket skill) goes under
   Blocked with its unblocking step, not under the workflow as if it worked.
@@ -116,6 +133,9 @@ Supersedes: loadout of <prior date>        <- only on a re-audit
 
 ## Situational (invoke when relevant)
 - <skill> — when
+
+## Capabilities (connected MCP servers, no stage number)
+- <server> — category it serves (omit section if none)
 
 ## Skip / noise for this project
 - <skill(s)> — why (redundant with X / wrong domain / conflicts with Y / off in this host)
@@ -236,6 +256,19 @@ python3 "<this-skill-dir>/scripts/scan.py" --self-install --hosts all     # ever
 
 Ask the user before installing. Updating is re-running `--self-install`; `--check`
 exits 1 when any copy is stale or missing.
+
+`references/skill-notes.md` is generated from skill bodies, so a wrong category or a group
+with no preferred skill still renders as a valid table. Validate it after any edit:
+
+```bash
+python3 "<this-skill-dir>/scripts/check_notes.py"
+```
+
+It checks categories, tiers, duplicates, one preferred skill per overlap group, and that no
+cell reads as an instruction. Add `--installed <names>` (a comma list, or a file with one name
+per line) to check the table against a machine as well: it reports every group whose preferred
+skill is not installed there and names the installed member to use instead. The table itself is
+machine-local and gitignored, since it is generated from one machine's skill bodies.
 
 ## Notes for specific hosts
 
