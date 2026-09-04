@@ -163,7 +163,10 @@ def test_codex_pre_denies_write_before_stage_one_and_allows_after(tmp_path):
     out = run_gate("pre", hook, host="codex")
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "`planner`" in out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert run_gate("pre", codex_hook(proj, t, "pre", tool_name="Bash", tool_input={"command": "git status --short"}), host="codex") is None
+    # before stage 1 no command is exempt, read-only shape included
+    assert run_gate("pre", codex_hook(proj, t, "pre", tool_name="Bash",
+                                      tool_input={"command": "git status --short"}),
+                    host="codex")["hookSpecificOutput"]["permissionDecision"] == "deny"
     t = rollout(tmp_path, [meta(str(proj)), user("$planner then do the thing")])
     assert run_gate("pre", hook, host="codex")["hookSpecificOutput"]["permissionDecision"] == "deny", "mention alone is not enough"
     t = rollout(tmp_path, [meta(str(proj)), user("$planner then do the thing"), skill_read("planner")])

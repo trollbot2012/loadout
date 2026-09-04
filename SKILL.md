@@ -194,10 +194,11 @@ On accept, make it stick — three actions:
    The wired section is prose: it tells an agent the workflow, it cannot make the
    agent follow it. On Claude Code the same command also registers the enforcement
    gate (`scripts/gate.py`) as PreToolUse and Stop hooks in `.claude/settings.local.json`.
-   From the next Claude Code session the agent cannot edit a file, or run a
-   write-shaped shell command, before the stage-1 skill has been invoked, and cannot
-   stop while a binding stage (any Accepted line not labelled `situational`) was never
-   invoked. Tell the user in one sentence that the gate takes effect from the next
+   From the next Claude Code session the agent cannot edit a file, or run any shell
+   command, before the stage-1 skill has been invoked, and cannot stop while a binding
+   stage (any Accepted line not labelled `situational`) was never invoked. This makes
+   the workflow binding; it is not an OS security boundary, since after stage 1 a
+   helper script run from the shell is opaque to any command-level check. Tell the user in one sentence that the gate takes effect from the next
    session; on every other host say the wiring is prose only. Pass `--no-enforce` only
    if the user asks for prose-only wiring. On Codex the gate is off unless the user asks
    for it explicitly (`--enforce-codex`); say the wiring is prose only there too.
