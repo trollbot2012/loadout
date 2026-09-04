@@ -119,6 +119,30 @@ def test_group_with_no_installed_member_is_not_reported(tmp_path):
     assert r.returncode == 0, r.stdout
 
 
+def test_installed_skill_with_no_row_is_reported(tmp_path):
+    """A skill installed since the table was generated has no row, so step 3 falls back to its
+    description - the very thing the table exists to compensate for. Only a live listing shows it."""
+    r = subprocess.run([sys.executable, str(CHECK), str(notes(tmp_path, GOOD)),
+                        "--installed", "codex-delegate,planning-with-files,brand-new-skill"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 1
+    assert "brand-new-skill" in r.stdout and "no row" in r.stdout
+
+
+def test_row_for_a_skill_this_host_lacks_is_not_reported(tmp_path):
+    """The reverse is fine: a table may describe more machines than the one being checked."""
+    r = subprocess.run([sys.executable, str(CHECK), str(notes(tmp_path, GOOD)),
+                        "--installed", "codex-delegate,planning-with-files"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout
+
+
+def test_coverage_is_silent_without_installed(tmp_path):
+    """Without a listing the check cannot know what is installed, so it must not guess."""
+    r = run(notes(tmp_path, GOOD))
+    assert r.returncode == 0 and "no row" not in r.stdout
+
+
 def test_installed_accepts_a_file(tmp_path):
     lst = tmp_path / "installed.txt"
     lst.write_text("cursor-delegate\nplanning-with-files\n", encoding="utf-8")

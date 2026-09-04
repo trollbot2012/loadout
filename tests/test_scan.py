@@ -9,6 +9,8 @@ import os
 import platform
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -65,6 +67,13 @@ def make_fixture(tmp_path):
           "---\nname: bigmeta\nmetadata:\n" + "".join(f"  k{i}: {'x' * 60}\n" for i in range(40))
           + "description: after a big metadata block\n---\n")
     write(h / ".claude/skills/offskill/SKILL.md", "---\ndescription: turned off\n---\n")
+    # a plugin bundle dropped into skills/: no SKILL.md of its own, real skills one level down
+    write(h / ".claude/skills/bundlekit/README.md", "# bundlekit plugin\n")
+    write(h / ".claude/skills/bundlekit/.claude-plugin/plugin.json", json.dumps({"name": "bundlekit"}))
+    write(h / ".claude/skills/bundlekit/skills/pipeline/SKILL.md",
+          "---\nname: pipeline\ndescription: Drives the bundlekit pipeline stage by stage\n---\n")
+    write(h / ".claude/skills/bundlekit/skills/verify/SKILL.md",
+          "---\nname: verify\ndescription: Checks bundlekit receipts\n---\n")
     # plugins: alpha enabled (skills+agents+hooks+mcp), beta disabled
     cache_a = h / ".claude/plugins/cache/mkt/alpha/1.0.0"
     write(cache_a / "skills/askill/SKILL.md", "---\ndescription: plugin skill alpha\n---\n")
@@ -389,6 +398,49 @@ def test_registered_gate_is_reported_for_reaudit(tmp_path):
     assert "scripts/gate.py" in scan.SKILL_FILES and "scripts/gate_codex.py" in scan.SKILL_FILES
     assert "scripts/gate_dsh.py" in scan.SKILL_FILES and "scripts/gate_dsh.mjs" in scan.SKILL_FILES
     assert "scripts/check_notes.py" in scan.SKILL_FILES
+
+
+def test_plugin_bundle_under_skills_lists_its_nested_skills(tmp_path):
+    """A bundle dropped into skills/ has no SKILL.md of its own, so it used to appear as a bare
+    name with no description - nothing the audit could classify, and not invocable either. Its
+    real skills live one level down and are named <bundle>:<skill>, like any other plugin skill."""
+    h, proj = make_fixture(tmp_path)
+    names = [e["name"] for e in scan_json(h, proj)["hosts"]["claude-code"]["assets"]["skills"]]
+    assert "bundlekit:pipeline" in names and "bundlekit:verify" in names
+    assert "bundlekit" not in names, "the bare bundle name is not invocable and should not be listed"
+
+
+def test_bundle_nested_skill_keeps_its_description(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    skills = {e["name"]: e["desc"] for e in scan_json(h, proj)["hosts"]["claude-code"]["assets"]["skills"]}
+    assert "pipeline stage by stage" in skills["bundlekit:pipeline"]
+
+
+def test_bundle_nested_skill_reports_its_link_target(tmp_path):
+    """Every other entry reports a symlink target; a bundle's nested skills must not be the one
+    path that silently drops it, since bundles are shared out of a common pool like any skill."""
+    h, proj = make_fixture(tmp_path)
+    pool = tmp_path / "pool/shared-pipeline"
+    write(pool / "SKILL.md", "---\ndescription: Shared bundle skill from a pool\n---\n")
+    link = h / ".claude/skills/linkedkit/skills/shared-pipeline"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    write(h / ".claude/skills/linkedkit/README.md", "# linkedkit\n")
+    try:
+        link.symlink_to(pool, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable (Windows without developer mode)")
+    entry = [e for e in scan_json(h, proj)["hosts"]["claude-code"]["assets"]["skills"]
+             if e["name"] == "linkedkit:shared-pipeline"]
+    assert entry, "nested skill missing"
+    assert "link" in entry[0], "symlink target dropped for a bundle's nested skill"
+
+
+def test_a_plain_skill_dir_is_untouched_by_bundle_handling(tmp_path):
+    """Guard the common case: an ordinary skill keeps its bare name even though it has no
+    nested skills/ dir."""
+    h, proj = make_fixture(tmp_path)
+    names = [e["name"] for e in scan_json(h, proj)["hosts"]["claude-code"]["assets"]["skills"]]
+    assert "plainskill" in names
 
 
 def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):

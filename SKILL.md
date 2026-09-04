@@ -41,7 +41,7 @@ The output is ordered by decision relevance:
    `plugin:skill`), plugins, registered hooks (from settings files and plugin hook
    manifests), commands, agents, rules. A `(off)`, `(user-invocable-only)` or
    `(off (plugin disabled))` marker means **on disk but not invocable now**. Never
-   recommend a marked skill without saying it must be re-enabled first.
+   recommend a marked skill, agent or command without saying it must be re-enabled first.
 4. Other harnesses (names only), other skills roots, **cross-host coverage**, MCP.
 
 Flags: `--brief` (current host + project only, first sentence of each description; run this first when
@@ -96,14 +96,19 @@ Rules:
 - **Flag conflicts**: skills whose instructions fight each other (e.g. a
   minimalism skill vs. a full-output skill; two competing planning systems).
   Hooks that inject always-on instructions count as parties to a conflict.
-- **Two lists, different things**: the numbered workflow is a list of installed
-  skills, one skill per stage — these become the `## Accepted` stages and are the
-  only lines the enforcement gate can observe. Capabilities is a list of connected
-  MCP servers with the category each one serves; the agent calls these directly, so
-  they carry no stage number. Read the report's `## MCP servers` section for them.
-- **Flag gaps**: a category counts as covered when either a skill or an MCP server
-  serves it. Record a gap only where neither does → suggest what to install and
-  where it comes from, but do not install without being asked.
+- **Two lists, different things**: the numbered workflow holds entries from
+  `### skills` and `### plugin-skills`, one per stage — these become the
+  `## Accepted` stages and are the only lines the enforcement gate can observe.
+  Capabilities holds everything else the host can do: entries from `## MCP servers`,
+  `### agents` and `### commands`, each with what it is, who invokes it and the
+  category it serves. You call an MCP server or a subagent; the user types a
+  command. They carry no stage number.
+- **One capability, one line**: a command that shares a plugin and a name with a
+  skill (`ponytail:ponytail-audit` appears as both) is one capability on two
+  surfaces — list it once, as the skill.
+- **Flag gaps**: a category counts as covered when a skill, an MCP server, a
+  subagent or a command serves it. Record a gap only where none does → suggest what
+  to install and where it comes from, but do not install without being asked.
 - **Flag blocked**: a recommended skill the project state prevents from running
   (no git repo for a review skill, no tracker for a ticket skill) goes under
   Blocked with its unblocking step, not under the workflow as if it worked.
@@ -127,15 +132,15 @@ Date: <YYYY-MM-DD>
 Enforcement: claude-code gate registered | prose only
 Supersedes: loadout of <prior date>        <- only on a re-audit
 
-## Recommended workflow
+## Recommended workflow (skills only; these become the Accepted stages)
 1. <stage> → <skill> — one-line why
 2. ...
 
 ## Situational (invoke when relevant)
 - <skill> — when
 
-## Capabilities (connected MCP servers, no stage number)
-- <server> — category it serves (omit section if none)
+## Capabilities (not stages; nothing here is numbered)
+- <name> (MCP | subagent | command) — who invokes it, category it serves (omit section if none)
 
 ## Skip / noise for this project
 - <skill(s)> — why (redundant with X / wrong domain / conflicts with Y / off in this host)
