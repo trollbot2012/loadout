@@ -435,6 +435,29 @@ def test_bundle_nested_skill_reports_its_link_target(tmp_path):
     assert "link" in entry[0], "symlink target dropped for a bundle's nested skill"
 
 
+def test_unreadable_bundle_dir_does_not_abort_the_inventory(tmp_path, monkeypatch):
+    """The scanner walks dozens of roots; one bundle whose skills/ cannot be listed must be
+    skipped, not take the whole inventory down with it."""
+    asset_dir = tmp_path / "skills"
+    write(asset_dir / "plainskill/SKILL.md", "---\ndescription: an ordinary skill\n---\n")
+    bundle = asset_dir / "lockedkit"
+    write(bundle / "skills/inner/SKILL.md", "---\ndescription: unreachable\n---\n")
+    real = Path.iterdir
+
+    def blocked(self):
+        if self.name == "skills" and self.parent.name == "lockedkit":
+            raise PermissionError("access denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", blocked)
+    # End to end through scan_dir, which is where the drop decision lives: the sibling
+    # survives and the unreadable bundle is gone, rather than reappearing as a bare name.
+    assert [e["name"] for e in scan.scan_dir(asset_dir)] == ["plainskill"]
+    # The two return states must stay distinct: [] drops the entry, None would list it.
+    assert scan.bundle_skills(bundle) == []
+    assert scan.bundle_skills(asset_dir / "plainskill") is None
+
+
 def test_a_plain_skill_dir_is_untouched_by_bundle_handling(tmp_path):
     """Guard the common case: an ordinary skill keeps its bare name even though it has no
     nested skills/ dir."""
