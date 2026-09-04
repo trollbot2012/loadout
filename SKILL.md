@@ -39,9 +39,11 @@ The output is ordered by decision relevance:
    `claude` and `dsh` are accepted aliases, anything else falls back to `unknown`).
 3. **Current host, full listing**: skills, `plugin-skills` (plugin-provided, named
    `plugin:skill`), plugins, registered hooks (from settings files and plugin hook
-   manifests), commands, agents, rules. A `(off)`, `(user-invocable-only)` or
-   `(off (plugin disabled))` marker means **on disk but not invocable now**. Never
-   recommend a marked skill, agent or command without saying it must be re-enabled first.
+   manifests), commands, agents, rules. An `(off)` or `(off (plugin disabled))`
+   marker means **on disk but not invocable at all**: never recommend such a skill,
+   agent, command or MCP server without saying it must be re-enabled first.
+   `(user-invocable-only)` is a different state — you cannot trigger it, but the
+   user can from the `/` menu, so recommend it as something for them to run.
 4. Other harnesses (names only), other skills roots, **cross-host coverage**, MCP.
 
 Flags: `--brief` (current host + project only, first sentence of each description; run this first when
@@ -106,12 +108,19 @@ Rules:
 - **One capability, one line**: a command that shares a plugin and a name with a
   skill (`ponytail:ponytail-audit` appears as both) is one capability on two
   surfaces — list it once, as the skill.
-- **Flag gaps**: a category counts as covered when a skill, an MCP server, a
-  subagent or a command serves it. Record a gap only where none does → suggest what
-  to install and where it comes from, but do not install without being asked.
-- **Flag blocked**: a recommended skill the project state prevents from running
-  (no git repo for a review skill, no tracker for a ticket skill) goes under
-  Blocked with its unblocking step, not under the workflow as if it worked.
+- **Flag gaps**: only what can be invoked now covers a category — a skill, subagent,
+  command or MCP server the listing shows with no disabled marker, meaning neither
+  `(off)` nor `(off (plugin disabled))`. Either marker means it covers nothing until
+  it is re-enabled, so it goes under Blocked and its category still counts as a gap.
+  A `(user-invocable-only)` entry does cover its category,
+  because the user can run it; say that it is theirs to invoke. Record a gap wherever
+  nothing invocable serves the category → suggest what to install and where it comes
+  from, but do not install without being asked.
+- **Flag blocked**: anything you would recommend — a skill, subagent, command or
+  MCP server — that the project state prevents from running (no git repo for a
+  review skill, no tracker for a ticket skill, a missing config file for a
+  command) goes under Blocked with its unblocking step, not under the workflow or
+  Capabilities as if it worked. A blocked entry does not cover its category.
 - **Use the cross-host section carefully**: a name missing here but installed in
   other harnesses is a one-copy fix only if no `plugin-skills` entry already covers
   that category. Check plugin-skills before calling a missing name a gap.
@@ -146,7 +155,7 @@ Supersedes: loadout of <prior date>        <- only on a re-audit
 - <skill(s)> — why (redundant with X / wrong domain / conflicts with Y / off in this host)
 
 ## Blocked
-- <skill> — what blocks it and the unblocking step (omit section if none)
+- <skill | subagent | command | MCP server> — what blocks it and the unblocking step (omit section if none)
 
 ## Gaps
 - <missing category> — suggested install

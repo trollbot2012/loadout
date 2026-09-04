@@ -207,16 +207,25 @@ def bundle_skills(p):
     [] when this is an ordinary skill dir. Listing the bundle name instead would give the audit
     a name it cannot classify and the user one they cannot invoke.
 
+    Returns None when this is not a bundle at all, so the caller lists it normally. A bundle
+    that cannot be read returns [], which drops it from the listing: one unreadable directory
+    must not abort an inventory spanning dozens of roots, and emitting the bare bundle name
+    would put back the unclassifiable, uninvocable entry this function exists to remove.
+
     Runs for every entry of every asset dir, so it stays two stat calls on the common path.
     A bundle sharing its name with an installed plugin would produce the same <bundle>:<skill>
     string in both `skills` and `plugin-skills`; left unguarded, as it needs a name collision
     at both levels to occur."""
     if not p.is_dir() or (p / "SKILL.md").is_file():
-        return []
+        return None
     nested = p / "skills"
     if not nested.is_dir():
+        return None
+    try:
+        children = sorted(nested.iterdir())
+    except OSError:
         return []
-    return [(f"{p.name}:{c.name}", c) for c in sorted(nested.iterdir())
+    return [(f"{p.name}:{c.name}", c) for c in children
             if c.is_dir() and (c / "SKILL.md").is_file()]
 
 
@@ -229,7 +238,7 @@ def scan_dir(d):
         if p.name.startswith(".") or p.name in INFRA_NAMES:
             continue
         inner = bundle_skills(p)
-        if inner:
+        if inner is not None:
             for n, c in inner:
                 e = {"name": n, "desc": desc_of(c)}
                 # The nested skill, or the bundle around it, can be a symlink into a shared
