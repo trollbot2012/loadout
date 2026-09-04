@@ -328,8 +328,11 @@ def test_self_install_check_and_host_opt_in(tmp_path):
         dest = h / host_dir / "skills/loadout"
         assert (dest / "SKILL.md").is_file() and (dest / "scripts/scan.py").is_file(), host_dir
         assert (dest / "scripts/apply.py").is_file() and (dest / "LICENSE").is_file(), host_dir
-        # the notes table sits in a second subdir; the copy must create it
-        assert (dest / "references/skill-notes.md").is_file(), host_dir
+        # The scripts/ copies already prove the per-file parent mkdir, since no host dir
+        # pre-exists. The notes table is machine-local and gitignored, so it is only here
+        # to copy when this machine has generated one.
+        if (REPO / "references/skill-notes.md").is_file():
+            assert (dest / "references/skill-notes.md").is_file(), host_dir
     assert not (h / ".someagent/skills/loadout").exists(), "discovered roots need --hosts all"
     assert not (h / ".qwen").exists(), "absent hosts are skipped, not created"
     r = run_scan(h, ["--check"])
