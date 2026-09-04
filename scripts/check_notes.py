@@ -5,17 +5,18 @@ The table is generated from skill bodies, so its failure mode is quiet: a wrong 
 group with no preferred skill still renders as a valid table and silently misleads the audit.
 This checks the rules the file can prove on its own.
 
-Coverage is deliberately out of scope: which skills are installed differs per machine, so a
-missing row is not something this file can know about. `scan.py` reports what is installed.
+The file alone cannot know which skills are installed, so coverage is checked only when a live
+listing is supplied with `--installed`.
 
     python3 scripts/check_notes.py [path]                      # internal consistency
     python3 scripts/check_notes.py [path] --installed a,b,c    # also check against a machine
 
 A table is generated on one machine, so a group's preferred skill can be absent on another.
 `--installed` takes the skill names a host actually has (a comma list, or a file with one
-name per line) and reports every group whose preferred skill is missing, naming the installed
-members to prefer instead. A group with no installed member at all is not reported: it is
-simply irrelevant there.
+name per line) and adds the two checks only a live listing can make: every group whose preferred
+skill is missing here, naming the installed members to prefer instead, and every installed skill
+with no row at all. A group with no installed member is not reported: it is simply irrelevant
+there. Rows for skills this host lacks are also fine - a table may describe more than one machine.
 
 Exit 0 clean, 1 rule violations (listed), 2 file missing or unparseable.
 """
@@ -106,6 +107,13 @@ def check(path, installed=None):
             if here and prefer[group] not in installed:
                 problems.append(f"{group}: preferred {prefer[group]!r} is not installed; "
                                 f"prefer an installed member instead: {', '.join(here)}")
+
+    # Coverage: a skill installed since the table was generated has no row, so step 3 falls back
+    # to its description - which is the very thing the table exists to compensate for. Only a live
+    # listing can reveal this, so it is reported here rather than by the file-only checks above.
+    if installed is not None:
+        for name in sorted(installed - set(rows)):
+            problems.append(f"{name}: installed but has no row; regenerate the table")
 
     for p in problems:
         print(p)

@@ -201,6 +201,25 @@ def desc_of(path):
     return val[:MAX_DESC]
 
 
+def bundle_skills(p):
+    """A plugin bundle dropped into an asset dir carries no SKILL.md of its own; its skills sit
+    one level down. Returns [(name, dir)] as <bundle>:<skill>, matching plugin-skill naming, or
+    [] when this is an ordinary skill dir. Listing the bundle name instead would give the audit
+    a name it cannot classify and the user one they cannot invoke.
+
+    Runs for every entry of every asset dir, so it stays two stat calls on the common path.
+    A bundle sharing its name with an installed plugin would produce the same <bundle>:<skill>
+    string in both `skills` and `plugin-skills`; left unguarded, as it needs a name collision
+    at both levels to occur."""
+    if not p.is_dir() or (p / "SKILL.md").is_file():
+        return []
+    nested = p / "skills"
+    if not nested.is_dir():
+        return []
+    return [(f"{p.name}:{c.name}", c) for c in sorted(nested.iterdir())
+            if c.is_dir() and (c / "SKILL.md").is_file()]
+
+
 def scan_dir(d):
     """List entries in an asset dir: [{name, desc[, link]}]. Skips dotfiles."""
     if not d.is_dir():
@@ -208,6 +227,17 @@ def scan_dir(d):
     out = []
     for p in sorted(d.iterdir()):
         if p.name.startswith(".") or p.name in INFRA_NAMES:
+            continue
+        inner = bundle_skills(p)
+        if inner:
+            for n, c in inner:
+                e = {"name": n, "desc": desc_of(c)}
+                # The nested skill, or the bundle around it, can be a symlink into a shared
+                # pool; every other entry reports its target, so these must too.
+                tgt = link_target(c) or link_target(p)
+                if tgt:
+                    e["link"] = tgt
+                out.append(e)
             continue
         e = {"name": p.stem if p.is_file() else p.name, "desc": desc_of(p)}
         tgt = link_target(p)
