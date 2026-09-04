@@ -54,17 +54,21 @@ first task and starting it, not by saving a file.
 
 `apply.py --host claude-code` also registers `scripts/gate.py` as a PreToolUse and Stop hook
 in the project's `.claude/settings.local.json` (local: the command embeds this machine's
-path). From the next session the agent cannot edit files, or run a write-shaped shell
-command, before the stage-1 skill has been invoked, and cannot stop while any binding stage
+path). From the next session the agent cannot edit files, or run any shell command, before
+the stage-1 skill has been invoked, and cannot stop while any binding stage
 (every Accepted line not labelled `situational`) was never invoked. The ledger is the
 session transcript; there is no state file and no agent-side override. A denied edit attempt
 still counts as an edit for the Stop gate: an agent that tried to mutate must run the workflow.
 
 Operator hatch: `LOADOUT_ENFORCE=0` in the environment, or remove LOADOUT.md. Skip
 registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md,
-`.claude/settings*.json`, gate.py, apply.py) is operator-owned: the agent cannot write to it
-at any stage, only the exact `apply.py` bootstrap invocation of this skill's own apply.py
-passes, and a re-audit that changes the accepted set runs under the hatch. Ceilings: the gate
+`.claude/settings*.json`, gate.py, apply.py) is operator-owned: direct edits and shell
+commands naming it are denied at any stage, only the exact `apply.py` bootstrap invocation of
+this skill's own apply.py passes, and a re-audit that changes the accepted set runs under the
+hatch. Scope: this is workflow enforcement plus tool- and command-level protection of the
+surface, not an OS security boundary. After stage 1, an agent with arbitrary shell execution
+can still reach protected files through a helper script, which no command-level check can
+classify; use OS permissions or a sandbox where that matters. Ceilings: the gate
 yields after 8 consecutive Stop blocks with no skill invoked in between on Claude Code only,
 because that host overrides the hook itself at that point (the count comes from the transcript,
 nothing on disk, so a fresh session inherits nothing); the shell write check is a heuristic that can misfire on an innocent
