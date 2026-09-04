@@ -66,3 +66,18 @@ Supersedes: loadout of 2026-09-03 (earlier run, pre-PR #6)
 - situational, when something breaks: `superpowers:systematic-debugging`
 - situational, notes-table fan-out: `superpowers:dispatching-parallel-agents`
 - situational, repeatable cycle: `loopy`
+
+Machine-readable for the devteam pipeline, whose parser reads only `|` rows under this
+heading and requires its own stage names. The list above stays the source of truth for
+loadout's own `apply.py` and `gate.py`, which read only the `- stage: `skill`` lines.
+`skill authoring` and `implementation` both correspond to devteam's single `implement`
+stage, so only one skill can occupy that slot; `superpowers:writing-skills` is not
+represented below. `decompose`, `security` and `docs` keep devteam's own handlers.
+
+| stage | skill |
+|---|---|
+| spec | planning-with-files |
+| implement | superpowers:test-driven-development |
+| review | code-review |
+| verify | superpowers:verification-before-completion |
+| release_ready | superpowers:finishing-a-development-branch |

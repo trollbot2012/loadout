@@ -8,3 +8,5 @@ __pycache__/
 # Machine-local: generated from the skill bodies installed on one machine, so it both
 # describes an inventory that is not portable and would publish it. Generate per install.
 references/skill-notes.md
+# devteam pipeline run state: machine- and run-local, like the planning files above
+.planning/
