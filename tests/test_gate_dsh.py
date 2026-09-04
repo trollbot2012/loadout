@@ -88,11 +88,14 @@ def test_pre_denies_an_edit_before_stage_one_and_allows_after(tmp_path):
                                 tool_input={"file_path": str(proj / "a.py")})) is None
 
 
-def test_pre_gates_shell_by_shape_and_never_gates_the_skill_tool(tmp_path):
+def test_pre_gates_every_shell_command_and_never_gates_the_skill_tool(tmp_path):
     proj = project(tmp_path)
     denied = run_gate("pre", hook(proj, [], tool_name="pwsh", tool_input={"command": "echo hi > a.txt"}))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert run_gate("pre", hook(proj, [], tool_name="pwsh", tool_input={"command": "git status --short"})) is None
+    # read-only shape is no exemption before stage 1: a command's writes are not knowable
+    assert run_gate("pre", hook(proj, [], tool_name="pwsh",
+                                tool_input={"command": "git status --short"}))["hookSpecificOutput"][
+        "permissionDecision"] == "deny"
     # the stage-1 skill must stay reachable, or the gate could never be satisfied
     assert run_gate("pre", hook(proj, [], tool_name="skill", tool_input={"name": "planner"})) is None
     for read_only in ("read", "glob", "grep", "todo_write"):

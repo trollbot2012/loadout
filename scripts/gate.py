@@ -13,6 +13,13 @@ The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md, .claude/settings*.jso
 apply.py) is operator-owned at every stage; only this skill's own apply.py, invoked in its
 exact bootstrap form, may touch it. Operator hatch: LOADOUT_ENFORCE=0 (or remove LOADOUT.md).
 There is no agent-side override.
+
+Scope. This is workflow enforcement plus pattern-matched protection of the surface at the
+tool and shell-command level. It is not an operating-system security boundary. Before the
+stage-1 skill runs, every Bash command is gated, so no command reaches the filesystem. After
+stage 1 an agent with arbitrary shell execution can still reach protected files indirectly --
+a helper script it invokes is opaque to any command-level check. Use OS permissions or a
+sandbox where that matters; the gate makes the workflow binding, not the filesystem immutable.
 """
 import json
 import os
@@ -292,7 +299,11 @@ def decide(mode, hook, env=None, host=None):
         if not tp_.is_absolute() and hook.get("cwd"):
             tp_ = Path(hook["cwd"]) / tp_
         target_dir = tp_.parent
-    loadout = find_loadout(hook.get("cwd"), target_dir, facts.cwd)
+    # The session's starting directory decides which loadout governs. It is the one directory the
+    # agent cannot move: `cd` changes hook["cwd"], so trusting that first would let a session step
+    # into a directory with a permissive LOADOUT.md and then edit this project by absolute path.
+    # The other two remain as fallbacks for sessions whose start directory has no LOADOUT.md.
+    loadout = find_loadout(facts.cwd, target_dir, hook.get("cwd"))
     if not loadout:
         # A host that told us a loadout governs this session, reporting none now, means the file was
         # removed mid-session. On a fail-closed host that is a bypass attempt, not a release.
@@ -314,8 +325,9 @@ def decide(mode, hook, env=None, host=None):
                 return _deny("Loadout gate: the enforcement config (LOADOUT.md, AGENTS.md, CLAUDE.md, "
                              f".claude/settings*.json, gate.py, apply.py) is operator-owned; only the exact "
                              f"apply.py bootstrap may write it. {HATCH}")
-            if not (write_shaped(cmd) or sensitive(cmd)):
-                return None
+            # Every other command falls through to the stage check. Classifying first would let
+            # `python existing_writer.py` through before stage 1, since no regex can tell what an
+            # arbitrary program writes. After stage 1 the check passes and behaviour is unchanged.
         elif is_edit_tool(tool):
             hit = next((p for p in _target_paths(inp) if is_surface(p)), None)
             if hit:  # case-insensitive filesystems; every file of a multi-file patch is checked
@@ -331,7 +343,8 @@ def decide(mode, hook, env=None, host=None):
                 invoked |= ledger_facts(parent, host).invoked
         if skill in invoked:
             return None
-        return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing. Details in LOADOUT.md. {HATCH}")
+        return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing or running commands. "
+                     f"Details in LOADOUT.md. {HATCH}")
     if mode == "stop":
         if not facts.edited:
             return None

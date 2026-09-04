@@ -29,16 +29,23 @@ def test_write_shaped_bash_commands():
     assert not gate.write_shaped("git status --short")
 
 
-def transcript(tmp_path, blocks, name="t.jsonl"):
+def transcript(tmp_path, blocks, name="t.jsonl", cwd=None):
     """Write a JSONL transcript. Each item is a list of content blocks for one assistant turn,
-    or a plain string for a user turn."""
+    or a plain string for a user turn. `cwd` stamps the session's starting directory, which the
+    gate reads from the first line that carries one."""
     p = tmp_path / name
     lines = []
     for item in blocks:
         if isinstance(item, str):
-            lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": item}}))
+            line = {"type": "user", "message": {"role": "user", "content": item}}
         else:
-            lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": item}}))
+            line = {"type": "assistant", "message": {"role": "assistant", "content": item}}
+        if cwd and not lines:
+            line["cwd"] = str(cwd)
+        lines.append(json.dumps(line))
+    if cwd and not lines:  # a transcript with no turns still records where the session began
+        lines.append(json.dumps({"type": "user", "cwd": str(cwd),
+                                 "message": {"role": "user", "content": "start"}}))
     p.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))  # LF on every platform, 3.9-safe
     return p
 
@@ -132,12 +139,57 @@ def test_pre_denies_edit_before_stage_one_and_allows_after(tmp_path):
     assert run_gate("pre", pre_hook(proj, t)) is None
 
 
-def test_pre_gates_only_write_shaped_bash(tmp_path):
+def test_pre_gates_every_bash_command_until_stage_one(tmp_path):
+    """No regex can tell what an arbitrary program writes, so the stage-1 prerequisite applies to
+    every command; the write/read classification only decides things once stage 1 has run."""
     proj = project(tmp_path)
     t = transcript(tmp_path, [])
-    assert run_gate("pre", pre_hook(proj, t, "Bash", command="python -m pytest -q")) is None
+    assert denied(pre_hook(proj, t, "Bash", command="python -m pytest -q"))
     assert denied(pre_hook(proj, t, "Bash", command="cat > a.py <<'EOF'"))
+    after = transcript(tmp_path, [[skill("planner")]], name="after.jsonl")
+    assert run_gate("pre", pre_hook(proj, after, "Bash", command="python -m pytest -q")) is None
+    assert run_gate("pre", pre_hook(proj, after, "Bash", command="cat > a.py <<'EOF'")) is None
+    # tools outside the gated set are never touched, at any stage
     assert run_gate("pre", pre_hook(proj, t, "Read", file_path="a.py")) is None
+
+
+def test_session_start_dir_decides_the_policy_not_the_post_cd_cwd(tmp_path):
+    """`cd` moves hook["cwd"], so a session could otherwise step into a directory holding a
+    permissive LOADOUT.md and edit its own project by absolute path under those rules."""
+    strict = project(tmp_path)                      # tmp_path/proj, binding: planner then reviewer
+    lax = tmp_path / "lax"
+    lax.mkdir()
+    (lax / "LOADOUT.md").write_bytes(
+        b"# Loadout: lax\n\n## Accepted\n- situational, anything: `nothing`\n")
+    # the session began in the strict project; the agent has since cd'd into the permissive one
+    t = transcript(tmp_path, [], cwd=strict)
+    hook = {"cwd": str(lax), "transcript_path": str(t), "tool_name": "Edit",
+            "tool_input": {"file_path": str(strict / "a.py"), "old_string": "a", "new_string": "b"}}
+    assert denied(hook), "the permissive post-cd directory must not govern the session"
+    # and the strict project's own stage still releases it
+    after = transcript(tmp_path, [[skill("planner")]], name="after.jsonl", cwd=strict)
+    hook["transcript_path"] = str(after)
+    assert run_gate("pre", hook) is None
+
+
+def test_session_start_dir_falls_back_when_it_has_no_loadout(tmp_path):
+    """Only a starting directory that actually carries a LOADOUT.md takes precedence; otherwise
+    the target path and the current cwd still resolve the policy as before."""
+    proj = project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    t = transcript(tmp_path, [], cwd=outside)
+    assert denied(pre_hook(proj, t, "Edit", file_path=str(proj / "a.py"), old_string="a", new_string="b"))
+
+
+def test_unclassified_command_is_gated_until_stage_one(tmp_path):
+    """A helper script is opaque to any regex: `python existing_writer.py` may write anything, so
+    it waits for stage 1 like every other command. The script is never run here."""
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [])
+    assert denied(pre_hook(proj, t, "Bash", command="python existing_writer.py"))
+    after = transcript(tmp_path, [[skill("planner")]], name="after.jsonl")
+    assert run_gate("pre", pre_hook(proj, after, "Bash", command="python existing_writer.py")) is None
 
 
 def test_bootstrap_boundary_is_exact_not_blanket(tmp_path):
@@ -192,7 +244,8 @@ def test_reading_the_enforcement_surface_is_not_an_edit(tmp_path):
 def test_pre_and_stop_through_subprocess_edge_cases(tmp_path):
     proj = project(tmp_path)
     t = transcript(tmp_path, [])
-    assert run_gate("pre", pre_hook(proj, t, "Bash", command="cmd 2>&1 >/dev/null")) is None
+    after = transcript(tmp_path, [[skill("planner")]], name="after.jsonl")
+    assert run_gate("pre", pre_hook(proj, after, "Bash", command="cmd 2>&1 >/dev/null")) is None
     bad = tmp_path / "bad.jsonl"
     bad.write_text("not json\n", encoding="utf-8")
     assert denied(pre_hook(proj, bad)), "garbage transcript: nothing invoked, edit still gated"
