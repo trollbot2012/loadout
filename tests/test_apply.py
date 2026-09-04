@@ -10,6 +10,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import apply  # noqa: E402
 import scan  # noqa: E402
+import gate  # noqa: E402
 
 LOADOUT = ("# Loadout: x\nHarness: claude-code | Project type: cli\nDate: 2026-09-02\n\n"
            "## Recommended workflow\n1. plan → `planner` — why\n\n"
@@ -84,6 +85,20 @@ def test_native_file_per_host_and_mirroring(tmp_path):
     assert not (tmp_path / "GEMINI.md").read_text(encoding="utf-8").count("## Loadout") > 1
 
 
+def test_devteam_table_rows_are_invisible_to_the_accepted_parser():
+    """A LOADOUT.md may carry a `| stage | skill |` table under ## Accepted for the devteam
+    pipeline, whose parser reads only `|` rows. Loadout reads only the `- stage: `skill`` lines,
+    so the two must not see each other's entries."""
+    text = ("# Loadout: x\n\n## Accepted\n"
+            "- planning: `planner`\n- review: `reviewer`\n"
+            "- situational, gated work: `unlazy`\n\n"
+            "| stage | skill |\n|---|---|\n"
+            "| spec | planner |\n| review | reviewer |\n")
+    assert apply.parse_accepted(text) == [
+        ("planning", "planner"), ("review", "reviewer"), ("situational, gated work", "unlazy")]
+    assert gate.binding_stages(text) == [("planning", "planner"), ("review", "reviewer")]
+
+
 def test_missing_accepted_is_an_error(tmp_path):
     (tmp_path / "LOADOUT.md").write_text("# Loadout\n## Recommended workflow\n- x\n", encoding="utf-8")
     with pytest.raises(ValueError):
@@ -121,6 +136,19 @@ def test_claude_md_with_agents_import_stays_import_only(tmp_path):
 def test_native_file_table_matches_the_scanner():
     # guard against the two copies drifting when a host is added to scan.py only
     assert apply.NATIVE == scan.NATIVE_FILES
+
+
+def test_this_repos_loadout_table_matches_its_accepted_list():
+    """LOADOUT.md states the accepted set twice: the `- stage: `skill`` lines loadout parses and
+    a `| stage | skill |` table the devteam pipeline parses. Nothing else keeps them in step, so
+    every skill named in the table must still be one this repo actually accepted."""
+    text = (REPO / "LOADOUT.md").read_text(encoding="utf-8")
+    accepted = {skill for _, skill in apply.parse_accepted(text)}
+    if "| stage | skill |" not in text:
+        pytest.skip("no devteam table in LOADOUT.md")
+    rows = [ln for ln in text.splitlines() if ln.startswith("|") and "---" not in ln]
+    table = {ln.strip("|").split("|")[1].strip().strip("`") for ln in rows[1:]}
+    assert table <= accepted, f"table names skills the accepted list does not: {table - accepted}"
 
 
 # ---------------------------------------------------------------- enforcement gate registration

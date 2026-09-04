@@ -60,6 +60,11 @@ the stage-1 skill has been invoked, and cannot stop while any binding stage
 session transcript; there is no state file and no agent-side override. A denied edit attempt
 still counts as an edit for the Stop gate: an agent that tried to mutate must run the workflow.
 
+Ordering note for command-driven tools: because every shell command is gated until the
+stage-1 skill has run, a tool that does its work through the shell (a pipeline runner, a task
+CLI) is denied until then. The `Skill` tool is not gated, so invoking the stage-1 skill first
+releases it — an ordering constraint, not a deadlock.
+
 Operator hatch: `LOADOUT_ENFORCE=0` in the environment, or remove LOADOUT.md. Skip
 registration with `--no-enforce`. The enforcement surface (LOADOUT.md, AGENTS.md, CLAUDE.md,
 `.claude/settings*.json`, gate.py, apply.py) is operator-owned: direct edits and shell
