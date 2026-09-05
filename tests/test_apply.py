@@ -100,6 +100,31 @@ def test_devteam_table_rows_are_invisible_to_the_accepted_parser():
     assert gate.binding_stages(text) == [("planning", "planner"), ("review", "reviewer")]
 
 
+def test_upsert_writes_lf_for_new_files_and_keeps_non_ascii(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT.replace("planner", "planñer"), encoding="utf-8")
+    apply.apply(tmp_path, "unknown")
+    raw = (tmp_path / "AGENTS.md").read_bytes()
+    assert b"\r\n" not in raw
+    assert b"\n" in raw
+    assert "planñer" in raw.decode("utf-8")
+    again = apply.apply(tmp_path, "unknown")
+    assert again["AGENTS.md"] == "replaced"
+    assert (tmp_path / "AGENTS.md").read_bytes() == raw
+
+
+def test_upsert_preserves_existing_crlf_and_neighbours(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    old = "# notes\r\nUse pnpm.\r\n\r\n## Loadout\r\nold\r\n\r\n## After\r\nkeep me\r\n"
+    (tmp_path / "AGENTS.md").write_bytes(old.encode("utf-8"))
+    apply.apply(tmp_path, "unknown")
+    raw = (tmp_path / "AGENTS.md").read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    text = raw.decode("utf-8").replace("\r\n", "\n")
+    assert text.startswith("# notes\nUse pnpm.\n\n## Loadout\n")
+    assert "old-planner" not in text and "invoke `planner`" in text
+    assert text.endswith("\n\n## After\nkeep me\n")
+
+
 def test_missing_accepted_is_an_error(tmp_path):
     (tmp_path / "LOADOUT.md").write_text("# Loadout\n## Recommended workflow\n- x\n", encoding="utf-8")
     with pytest.raises(ValueError):

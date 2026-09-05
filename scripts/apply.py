@@ -397,7 +397,9 @@ def upsert_native(path, blk):
 def upsert(path, blk, create_with=None):
     """Replace the ## Loadout section, else append it, else create the file. Returns the action."""
     if path.is_file():
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
+        nl = "\r\n" if b"\r\n" in raw else "\n"
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         m = SECTION_RE.search(text)
         if m:
             sep = "\n" if m.end() < len(text) else ""
@@ -406,11 +408,11 @@ def upsert(path, blk, create_with=None):
         else:
             new = text.rstrip("\n") + ("\n\n" if text.strip() else "") + blk
             action = "appended"
-    else:
-        new = blk if create_with is None else create_with
-        action = "created"
-    path.write_text(new, encoding="utf-8")
-    return action
+        with path.open("w", encoding="utf-8", newline="") as f:
+            f.write(new.replace("\n", nl))
+        return action
+    write_lf(path, blk if create_with is None else create_with)
+    return "created"
 
 
 def resolve_host(host):
