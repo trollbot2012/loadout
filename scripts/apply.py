@@ -26,7 +26,10 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
     covers headless, tui and web alike — machine-wide. Default reapplication neither
     removes nor rewrites an existing registration. Without the flag, --host deepseek/dsh
     writes the prose section and skips registration this invocation. Skip registration
-    with --no-enforce. Runtime hatch: LOADOUT_ENFORCE=0.
+    with --no-enforce. Runtime hatch: LOADOUT_ENFORCE=0. The entry pins the interpreter the
+    plugin spawns (LOADOUT_PYTHON, else python then python3), validated by running it: on
+    this host a spawn failure denies every tool call, so an interpreter that only exists is
+    not good enough, and an unusable LOADOUT_PYTHON is an error rather than a fallback.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -34,6 +37,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -426,17 +430,26 @@ def _dsh_append(lines, entry):
     return lines + entry + [""]
 
 
-def dsh_entry(plugin=None):
+def dsh_entry(plugin=None, python=None):
     """The loader patch entry that loads our gate. `name` must be a file:// URL: Node ESM rejects a
-    bare Windows path with ERR_UNSUPPORTED_ESM_URL_SCHEME. lstrip keeps POSIX at three slashes too."""
+    bare Windows path with ERR_UNSUPPORTED_ESM_URL_SCHEME. lstrip keeps POSIX at three slashes too.
+
+    `python`, when given, is pinned as this entry's `config.python`, which dsh hands to the plugin's
+    `apply(ctx, config)` -- the same per-entry `config` the live-proof overlay uses on its
+    `- id: settings` entry. Pinning it is what makes the interpreter apply validated and the
+    interpreter the plugin spawns the same one, instead of each side guessing from PATH. JSON is a
+    YAML 1.2 double-quoted scalar, so a path with spaces or backslashes survives the quoting."""
     url = "file:///" + str(Path(plugin or DSH_PLUGIN)).replace("\\", "/").lstrip("/")
-    return "- insert:\n    - id: loadout-gate\n      name: " + url + "\n"
+    entry = "- insert:\n    - id: loadout-gate\n      name: " + url + "\n"
+    if python:
+        entry += "      config:\n        python: " + json.dumps(str(python)) + "\n"
+    return entry
 
 
-def register_dsh_gate(path=None, plugin=None):
+def register_dsh_gate(path=None, plugin=None, python=None):
     """Upsert our entry into the user-level $DSH_HOME/cordis.patch.yml. Returns the action."""
     path = Path(path or DSH_PATCH)
-    entry = dsh_entry(plugin).rstrip("\n").split("\n")
+    entry = dsh_entry(plugin, python).rstrip("\n").split("\n")
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         write_lf(path, DSH_HEADER + "\n".join(entry) + "\n")
@@ -557,16 +570,52 @@ def _require_file(path, results):
         raise EnforcementFailed(f"{path.name} not found ({path})", results)
 
 
+PY_PROBE_TIMEOUT = 20  # seconds: a candidate that will not answer in bounded time is not usable
+
+
+def _usable_python(cand):
+    """`cand` resolved to an executable the dsh plugin can actually launch, or None.
+
+    A `which` hit or an existing file is not proof of usability: a Microsoft Store alias, a broken
+    install or a text file all resolve and then fail at spawn, and on this fail-closed host every
+    such failure becomes a total deny. So the candidate is run, headless and bounded, and what gets
+    pinned is the `sys.executable` it reports rather than the name it was reached by -- the plugin
+    launches it through Node's `spawnSync`, which refuses a `.cmd`/`.bat` wrapper outright (EINVAL,
+    Node 24) and will not PATHEXT-resolve one from PATH. Same interpreter, launchable form."""
+    if not cand:
+        return None
+    path = str(cand) if Path(cand).is_file() else shutil.which(str(cand))
+    if not path:
+        return None
+    try:
+        r = subprocess.run([path, "-c", "import sys; sys.stdout.write(sys.executable)"],
+                           stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                           errors="replace", timeout=PY_PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None  # not executable, not an interpreter, or it hung
+    if r.returncode != 0:
+        return None
+    reported = (r.stdout or "").strip()
+    if reported and Path(reported).is_file():
+        return reported
+    # an interpreter that reports no sys.executable (embedded, frozen) is still usable, but only if
+    # the path we would pin is one Node can spawn
+    return path if Path(path).suffix.lower() not in (".cmd", ".bat") else None
+
+
 def _dsh_python():
-    """Python the dsh plugin will spawn: LOADOUT_PYTHON if set, else python/python3 on PATH."""
+    """The exact interpreter the dsh plugin will launch, resolved and proven to run.
+
+    LOADOUT_PYTHON wins and does not fall back: an explicit choice that cannot run is an error to
+    report, not a reason to launch some other interpreter under its name. Otherwise `python` then
+    `python3` -- the same candidates in the same order as the plugin's own fallback, so a
+    python3-only PATH cannot leave apply validating one interpreter while the plugin spawns
+    another."""
     env = os.environ.get("LOADOUT_PYTHON")
-    cands = (env,) if env else ("python", "python3")
-    for cand in cands:
-        if not cand:
-            continue
-        if Path(cand).is_file():
-            return cand
-        found = shutil.which(cand)
+    if env:
+        return _usable_python(env)
+    for cand in ("python", "python3"):
+        found = _usable_python(cand)
         if found:
             return found
     return None
@@ -644,11 +693,25 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         _require_file(DSH_PLUGIN, results)
         _require_file(GATE, results)
         _require_file(GATE_DSH, results)
-        if not _dsh_python():
-            raise EnforcementFailed("no usable Python for the dsh plugin (set LOADOUT_PYTHON)", results)
-        results["~/.dsh/cordis.patch.yml"] = register_dsh_gate() + (
+        python = _dsh_python()
+        if not python:
+            chosen = os.environ.get("LOADOUT_PYTHON")
+            raise EnforcementFailed(
+                f"LOADOUT_PYTHON={chosen!r} is not a usable Python: it must resolve to an executable"
+                " that runs and reports an interpreter (an explicit choice is never replaced by"
+                " another interpreter)" if chosen else
+                "no usable Python for the dsh plugin (tried python, then python3, on PATH; set"
+                " LOADOUT_PYTHON to an interpreter that runs)", results)
+        try:
+            # registration is the last write and can still fail on its own (an unwritable or
+            # unreadable cordis.patch.yml): report it against what really landed
+            action = register_dsh_gate(python=python)
+        except (OSError, ValueError) as e:
+            raise EnforcementFailed(str(e), results)
+        results["~/.dsh/cordis.patch.yml"] = action + (
             " (dsh loads the plugin at the next session; there is no per-repo config,"
-            " so this registration covers every profile)")
+            " so this registration covers every profile)"
+            f"; plugin interpreter pinned to {python}")
     return results
 
 

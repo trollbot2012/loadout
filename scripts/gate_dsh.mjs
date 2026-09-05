@@ -40,8 +40,29 @@ const SKILL_LOADED = /<skill_content\s+name=\\?"([^"\\]+)/;
 /** One ledger per process, so a second load of this plugin cannot start a fresh, empty one. */
 const LEDGER = (globalThis.__loadoutGateLedger ??= { events: [] });
 
+const PY_PROBE_TIMEOUT_MS = 20000;
+
+/**
+ * The interpreter to spawn when the registration does not pin one. A registration written by
+ * `apply.py` sets `config.python` to the executable it validated, and that is the path that agrees
+ * with what apply checked. Registered by hand (or by the proof overlay) there is no such pin, so
+ * probe the same candidates in the same order apply does: `python` is simply absent on a
+ * python3-only PATH, and without this every spawn fails and the fail-closed paths deny everything.
+ * Nothing usable: keep `python`, so the failure is the documented spawn failure, still fail closed.
+ */
+function pickPython() {
+  for (const cand of ['python', 'python3']) {
+    try {
+      const r = spawnSync(cand, ['-c', 'import sys; sys.exit(0)'],
+        { timeout: PY_PROBE_TIMEOUT_MS, windowsHide: true, stdio: 'ignore' });
+      if (!r.error && r.status === 0) return cand;
+    } catch { /* try the next candidate */ }
+  }
+  return 'python';
+}
+
 export function apply(ctx, config = {}) {
-  const python = config.python ?? process.env.LOADOUT_PYTHON ?? 'python';
+  const python = config.python ?? process.env.LOADOUT_PYTHON ?? pickPython();
   const gate = config.gate ?? new URL('./gate.py', import.meta.url).pathname.replace(/^\//, '');
   const events = LEDGER.events;
   const note = (m) => { try { process.stderr.write(`loadout-gate: ${m}\n`); } catch { /* never throw from a note */ } };

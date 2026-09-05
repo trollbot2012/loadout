@@ -95,11 +95,18 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   does is interpreter- and route-dependent rather than universal. On 3.14.6 here, `is_file`,
   `exists` and `is_symlink` delegate to `os.path`'s `nt._path_*` accelerators, which are documented
   to answer `False` rather than raise for a path they cannot inspect — a refusal at `os.stat` never
-  reaches them (observed: with `os.stat` mocked to refuse, `is_file` still read `True`). On 3.13.15
-  `is_file`/`exists` go through `Path.stat()` -> `os.stat` and propagate the error instead, which
-  the earlier preflight caught and refused on. The old check was therefore safe on 3.13 and unsafe
-  wherever the predicates answer `False`: there a stat the OS refuses and a path that can never hold
-  a file both read as absent, and the preflight returned success it had not earned. Byte-level,
+  reaches them. What was actually observed is narrower than that documented behaviour: under the
+  `os.stat`/`os.lstat`-only mock on 3.14.6, `is_file`/`exists`/`is_symlink` read `True`/`True`/`False`,
+  because the accelerators answered from the real file without ever consulting the refused call. That
+  is a result of the mock, not a measurement of what the accelerators return when they themselves
+  cannot inspect a path; no native inspection denial was run, so the `False` reading is reached here
+  only by the separate forced simulation described below. On 3.13.15 `is_file`/`exists` go through
+  `Path.stat()` -> `os.stat` and propagate the error instead, which the earlier preflight caught and
+  refused on. The old check was therefore safe on 3.13.15 on that refused-stat route only — and not
+  more broadly: the file-parent case (`<regular file>/config.toml`, which raises `FileNotFoundError`
+  exactly as a genuine miss does) was observed to defeat it on 3.13.15 as well as on 3.14.6. It is
+  also unsafe wherever the predicates answer `False`: there a stat the OS refuses and a path that can
+  never hold a file both read as absent, and the preflight returned success it had not earned. Byte-level,
   against 7b11934 with that `False` reading forced for the config path only: `apply` returned
   success and `config.toml` was *replaced* by a bare `[hooks.state]` — a foreign `[model]` table
   gone at exit 0 — on 3.13.15 and 3.14.6 alike. It now probes with `os.lstat` and, when that fails,
@@ -212,6 +219,21 @@ Read from the installed tree, not from docs: `%LOCALAPPDATA%/Programs/DeepSeek H
   config** (a repo's `.dsh/` holds skills and AGENTS.md only) and **no trust gate on plugin load**;
   patch YAML permits `!!js` expressions. The enforcement surface on this host therefore has to
   include `cordis.patch.yml`, the profile `package.json` and `settings.yaml`.
+- **Interpreter — differs, and has to be pinned.** The plugin is JavaScript and the policy is
+  Python, so every decision costs a `spawnSync` of an interpreter — and on this host a spawn that
+  fails is not a degraded check, it is a total deny (fail closed). Two hazards follow. Existence is
+  not usability: a `which` hit, a Microsoft Store alias or a `python.cmd` launcher all resolve and
+  then fail at spawn, so `apply` runs the candidate (bounded, headless) and keeps the `sys.executable`
+  it reports rather than the name it was reached by. And the two sides must agree: `apply` writes the
+  validated executable into the registration entry as `config.python`, which dsh hands to the
+  plugin's `apply(ctx, config)` — the same per-entry `config` the proof overlay uses on its
+  `- id: settings` entry. `LOADOUT_PYTHON`, when set, is the choice and is never replaced by another
+  interpreter; an unusable one is reported as an error naming it. A registration written by hand pins
+  nothing, so the plugin falls back to probing `python` then `python3` itself, in `apply`'s order.
+  Windows detail that drives the design: Node's `spawnSync` refuses a `.cmd`/`.bat` (EINVAL, observed
+  on Node 24.18.0) and does not PATHEXT-resolve one from PATH, so a launcher is never what gets
+  pinned — only a real executable is. Not covered: a pinned interpreter that stops working between
+  `apply` and the session, and any platform other than this Windows host.
 - **Language — meets the contract via a wrapper.** A plugin is an in-process ESM module
   (`apply(ctx, config)`); there is no external-process hook runner (`hook/invoked` and `hook/result`
   are reserved session-event names with zero producers). But `tools/pre-execute` is an awaited async

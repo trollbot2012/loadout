@@ -2,6 +2,8 @@
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -749,6 +751,236 @@ def test_dsh_gate_is_opt_in(tmp_path, dsh_patch):
     assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek", enforce=False, enforce_dsh=True)
 
 
+# ------------------------------------------- dsh interpreter agreement (real PATH, real processes)
+
+NODE = shutil.which("node")
+
+
+def _shim(directory, name, command):
+    """A launcher on a real PATH that forwards to `command`. Windows gets a `.cmd`, POSIX a `sh`
+    script; `shutil.which` finds either and both really run, so PATH resolution and the process
+    result are native here, not mocked."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        path = directory / (name + ".cmd")
+        path.write_text("@echo off\r\n" + subprocess.list2cmdline(command) + " %*\r\n", encoding="utf-8")
+    else:
+        path = directory / name
+        path.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n', encoding="utf-8")
+        path.chmod(0o755)
+    return path
+
+
+def _reported_executable(path):
+    """What `path` reports as its own sys.executable -- the value both sides pin and spawn. A
+    relocated executable reports itself; a launcher reports the interpreter it starts."""
+    r = subprocess.run([str(path), "-c", "import sys; sys.stdout.write(sys.executable)"],
+                       capture_output=True, encoding="utf-8", timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def _native_python(directory, name, monkeypatch):
+    """A real interpreter executable named `name`, alone on a real PATH. Node's spawnSync will not
+    run a `.cmd` (EINVAL) and does not PATHEXT-resolve one, so the plugin-side tests need a genuine
+    executable, not a launcher. On Windows that means hardlinking (or copying) this interpreter and
+    the DLLs beside it, because a trimmed PATH is exactly what stops it finding them; PYTHONHOME
+    then points the relocated copy at the real stdlib. Skipped, not faked, if it will not run."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        return _shim(directory, name, [sys.executable])
+    path = directory / (name + ".exe")
+    for src in [Path(sys.executable)] + sorted(Path(sys.executable).parent.glob("*.dll")):
+        dest = directory / (path.name if src.name == Path(sys.executable).name else src.name)
+        try:
+            os.link(src, dest)
+        except OSError:  # pragma: no cover - host dependent (cross-volume, or no link support)
+            shutil.copy2(src, dest)
+    monkeypatch.setenv("PYTHONHOME", sys.prefix)
+    env = dict(os.environ, PATH=str(directory), PYTHONHOME=sys.prefix)
+    try:
+        r = subprocess.run([str(path), "-c", "import sys; sys.stdout.write(sys.executable)"],
+                           capture_output=True, encoding="utf-8", timeout=60, env=env)
+    except OSError as e:  # pragma: no cover - host dependent
+        pytest.skip(f"a relocated interpreter does not run on this host: {e}")
+    if r.returncode != 0 or r.stdout.strip() != str(path):  # pragma: no cover - host dependent
+        pytest.skip(f"a relocated interpreter does not run on this host: {r.returncode} {r.stderr[:200]}")
+    return path
+
+
+def test_dsh_pins_the_interpreter_it_validated_on_a_python3_only_path(tmp_path, monkeypatch, dsh_patch):
+    """Regression: on a python3-only PATH apply validated `python3` and the plugin then spawned
+    `python`, which is not there -- and on this fail-closed host a spawn failure denies everything.
+    The PATH here really carries only python3, and the entry pins what apply proved."""
+    real = _native_python(tmp_path / "bin", "python3", monkeypatch)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.delenv("LOADOUT_PYTHON", raising=False)
+    assert shutil.which("python") is None, "fixture PATH must not offer `python`"
+    picked = apply._dsh_python()
+    assert Path(picked).samefile(_reported_executable(real)), "PATH case may differ; the file must not"
+
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert res["~/.dsh/cordis.patch.yml"].startswith("created" + DSH_NOTE)
+    assert res["~/.dsh/cordis.patch.yml"].endswith(f"; plugin interpreter pinned to {picked}")
+    text = dsh_text(dsh_patch)
+    assert "      config:\n        python: " + json.dumps(picked) + "\n" in text
+    assert apply.apply(tmp_path, "dsh", enforce_dsh=True)["~/.dsh/cordis.patch.yml"].startswith("unchanged")
+
+
+def test_dsh_entry_pins_python_only_when_one_is_given():
+    assert "config:" not in apply.dsh_entry()
+    entry = apply.dsh_entry(Path("C:/x/y/gate_dsh.mjs"), r"C:\Program Files\py 3\python.exe")
+    assert entry == ('- insert:\n    - id: loadout-gate\n      name: file:///C:/x/y/gate_dsh.mjs\n'
+                     '      config:\n        python: "C:\\\\Program Files\\\\py 3\\\\python.exe"\n')
+
+
+def test_dsh_rejects_an_existing_but_unusable_interpreter(tmp_path, monkeypatch, dsh_patch):
+    """A `which` hit is not proof of usability. The stub here is a real file on a real PATH that
+    really runs and really fails; selection falls through to the candidate that works."""
+    binm = tmp_path / "bin"
+    _shim(binm, "python", [sys.executable, "-c", "raise SystemExit(9)"])
+    monkeypatch.setenv("PATH", str(binm))
+    monkeypatch.delenv("LOADOUT_PYTHON", raising=False)
+    assert shutil.which("python") is not None, "the unusable candidate resolves on PATH"
+    assert apply._usable_python("python") is None
+    assert apply._dsh_python() is None, "no fallback exists yet"
+
+    _shim(binm, "python3", [sys.executable])
+    assert apply._dsh_python() == sys.executable, "a launcher resolves to the interpreter it starts"
+
+
+def test_dsh_no_usable_interpreter_keeps_prose_and_names_both_candidates(tmp_path, monkeypatch, dsh_patch):
+    binm = tmp_path / "bin"
+    for name in ("python", "python3"):
+        _shim(binm, name, [sys.executable, "-c", "raise SystemExit(9)"])
+    monkeypatch.setenv("PATH", str(binm))
+    monkeypatch.delenv("LOADOUT_PYTHON", raising=False)
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert "python3" in str(ei.value) and "LOADOUT_PYTHON" in str(ei.value)
+    assert ei.value.results["AGENTS.md"] == "created"
+    assert (tmp_path / "AGENTS.md").is_file() and not dsh_patch.exists()
+
+
+def test_explicit_loadout_python_is_reported_not_silently_replaced(tmp_path, monkeypatch, dsh_patch):
+    """An explicit choice that cannot run is an error naming that choice. Registering some other
+    interpreter under it would claim a selection the operator never made."""
+    binm = tmp_path / "bin"
+    _shim(binm, "python", [sys.executable])
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setenv("PATH", str(binm))
+
+    # the case that used to register: an explicit choice that exists and does not run. It was
+    # pinned on the strength of being a file, and every spawn then failed into a total deny.
+    broken = _shim(binm, "not-a-python", [sys.executable, "-c", "raise SystemExit(9)"])
+    monkeypatch.setenv("LOADOUT_PYTHON", str(broken))
+    assert Path(broken).is_file() and apply._dsh_python() is None
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert "LOADOUT_PYTHON" in str(ei.value) and broken.name in str(ei.value)
+    assert not dsh_patch.exists() and (tmp_path / "AGENTS.md").is_file()
+    assert apply._dsh_python() != str(_shim(binm, "python", [sys.executable])), "no silent fallback"
+
+    monkeypatch.setenv("LOADOUT_PYTHON", str(tmp_path / "no-such-python"))
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert "no-such-python" in str(ei.value)
+    assert not dsh_patch.exists()
+
+    monkeypatch.setenv("LOADOUT_PYTHON", sys.executable)
+    apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert "python: " + json.dumps(sys.executable) in dsh_text(dsh_patch)
+
+
+def test_dsh_registration_failure_after_prose_reports_the_real_writes(tmp_path, monkeypatch, dsh_patch, capsys):
+    """A registration write that fails after the prose landed must report what really landed: the
+    prose result is kept in the failure, the CLI prints it and exits 2, and nothing claims a clean
+    skip, a rollback or a registration that did not happen."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("cordis.patch.yml is not writable")
+
+    monkeypatch.setattr(apply, "register_dsh_gate", boom)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "dsh", enforce_dsh=True)
+    assert ei.value.results["AGENTS.md"] == "created"
+    assert "~/.dsh/cordis.patch.yml" not in ei.value.results
+    assert "not writable" in str(ei.value)
+    assert "## Loadout" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert not dsh_patch.exists()
+
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "dsh", "--enforce-dsh"])
+    with pytest.raises(SystemExit) as si:
+        apply.main()
+    assert si.value.code == 2
+    out = capsys.readouterr().out
+    assert "- AGENTS.md: " in out
+    assert "enforcement: skipped: cordis.patch.yml is not writable" in out
+    assert "registered" not in out and "cordis.patch.yml: " not in out
+
+
+def _drive_plugin(tmp_path, config, env=None):
+    """Load the real plugin the way dsh does -- by file:// URL, with an entry's `config` -- and put
+    one mutating tool through `tools/pre-execute`. Returns (decision, interpreter that ran the gate).
+    The gate it spawns is a stand-in that records `sys.executable` and allows."""
+    record = tmp_path / "spawned-by.txt"
+    probe = tmp_path / "probe_gate.py"
+    probe.write_text("import sys, pathlib\nsys.stdin.read()\n"
+                     f"pathlib.Path({json.dumps(str(record))}).write_text(sys.executable, encoding='utf-8')\n",
+                     encoding="utf-8")
+    url = "file:///" + str(apply.DSH_PLUGIN).replace("\\", "/").lstrip("/")
+    driver = tmp_path / "drive.mjs"
+    driver.write_text(
+        f"import {{ apply }} from {json.dumps(url)};\n"
+        "const handlers = {};\n"
+        "apply({ on: (evt, fn) => { handlers[evt] = fn; } }, JSON.parse(process.argv[2]));\n"
+        "const out = handlers['tools/pre-execute']({ name: 'write', arguments: { file_path: 'a.txt' } },"
+        " () => ({ kind: 'allow' }));\n"
+        "process.stdout.write(JSON.stringify(out ?? null));\n", encoding="utf-8")
+    cfg = dict(config)
+    cfg.setdefault("gate", str(probe))
+    r = subprocess.run([NODE, str(driver), json.dumps(cfg)], capture_output=True,
+                       encoding="utf-8", errors="replace", timeout=120, cwd=str(tmp_path), env=env)
+    assert r.returncode == 0, r.stderr
+    ran = record.read_text(encoding="utf-8") if record.is_file() else None
+    return json.loads(r.stdout), ran, r.stderr
+
+
+@pytest.mark.skipif(not NODE, reason="node is not installed on this host")
+def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monkeypatch, dsh_patch):
+    """End to end on the real artefacts: apply writes the registration on a python3-only PATH, the
+    pin is read back out of that file, and the real plugin -- given that entry's config -- spawns
+    exactly it. Agreement is proven by the interpreter that actually ran, not by both sides
+    computing the same string."""
+    real = _native_python(tmp_path / "bin", "python3", monkeypatch)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.delenv("LOADOUT_PYTHON", raising=False)
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    apply.apply(tmp_path, "dsh", enforce_dsh=True)
+
+    pinned = json.loads(dsh_text(dsh_patch).split("python: ", 1)[1].splitlines()[0])
+    assert Path(pinned).samefile(_reported_executable(real))
+    decision, ran, _ = _drive_plugin(tmp_path, {"python": pinned})
+    assert ran == pinned, "the plugin ran exactly the interpreter the registration pinned"
+    assert decision == {"kind": "allow"}, "a gate that ran and allowed is not a fail-closed deny"
+
+
+@pytest.mark.skipif(not NODE, reason="node is not installed on this host")
+def test_dsh_plugin_falls_back_to_python3_when_python_is_absent(tmp_path, monkeypatch):
+    """A registration written by hand pins nothing, so the plugin resolves candidates itself. With
+    only python3 on PATH the old default `python` failed to spawn and denied every tool call."""
+    real = _native_python(tmp_path / "bin", "python3", monkeypatch)
+    env = {k: v for k, v in os.environ.items() if k != "LOADOUT_PYTHON"}
+    env["PATH"] = str(tmp_path / "bin")
+    decision, ran, stderr = _drive_plugin(tmp_path, {}, env=env)
+    assert ran and Path(ran).samefile(_reported_executable(real)), \
+        f"plugin did not fall back to python3 (stderr: {stderr[:300]})"
+    assert decision == {"kind": "allow"}
+
+
 def test_trust_codex_gate_drops_its_own_stale_entries_when_the_gate_moves(tmp_path):
     """Regression: trust keys are positional (<event>:<group>:<handler>), but the gate is re-found by
     its "gate.py" command. When another hook is added ahead of it the gate moves, and the entry left at
@@ -1044,10 +1276,14 @@ def _deny_inspection(monkeypatch, target):
 
     What that refusal reaches depends on the interpreter. On 3.13.15 Path.is_file/exists go through
     Path.stat() -> os.stat and the PermissionError propagates; on 3.14.6 they answer from os.path's
-    nt._path_* accelerators, which never consult os.stat and report False. So this denies the direct
-    os.lstat probe on both, but on 3.14 it does not reach the predicates at all -- forcing that
-    reading is _simulate_all_false_predicates' job. Both calls are patched because stat follows
-    symlinks and lstat does not."""
+    nt._path_* accelerators, which never consult os.stat -- so under this mock they keep reading the
+    real file, and is_file/exists/is_symlink were observed as True/True/False. That is this mock's
+    result, not the accelerators failing to inspect a path: their documented False-rather-than-raise
+    answer is about an inspection that really is denied to them, which is not what happens here and
+    is not exercised natively anywhere in this suite. So this denies the direct os.lstat probe on
+    both interpreters, but on 3.14 it does not reach the predicates at all -- forcing that reading is
+    _simulate_all_false_predicates' job. Both calls are patched because stat follows symlinks and
+    lstat does not."""
     real_stat, real_lstat = os.stat, os.lstat
 
     def denied(real):
