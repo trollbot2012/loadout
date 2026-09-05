@@ -37,6 +37,11 @@ import shutil
 import sys
 from pathlib import Path
 
+try:  # the stdlib TOML parser, 3.11+. The 3.9 core stays parser-free: see codex_config_problem
+    import tomllib
+except ImportError:  # pragma: no cover - depends on the running interpreter
+    tomllib = None
+
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
 # Copied from scan.py (do not import the scanner: apply stays stdlib-only and path-independent).
 # Drift is pinned by tests/test_apply.py::test_host_aliases_match_the_scanner.
@@ -302,6 +307,32 @@ def _drop_stale_gate_trust(text, hooks_path, wanted):
     return new, new != text
 
 
+def codex_config_problem(path=None):
+    """Why the existing Codex trust config cannot be safely edited, or None when it can.
+
+    trust_codex_gate edits config.toml textually, so a file Codex itself cannot parse must never be
+    appended to: the append would report trust granted while the hook stays untrusted forever, and
+    the operator would be left holding a file that is now both broken and modified. Unreadable is
+    detectable on every supported interpreter; malformed needs a TOML parser, and the stdlib only
+    ships one from 3.11 (tomllib). On 3.9/3.10 the parse check is skipped rather than hand-rolled --
+    no partial parser, no new dependency -- so only the readability guarantee holds there. The
+    boundary is recorded in docs/host-capability-matrix.md."""
+    path = Path(path if path is not None else CODEX_CONFIG)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"config.toml is not readable ({e}); fix it or drop --enforce-codex"
+    if tomllib is None:
+        return None
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return f"config.toml is not valid TOML ({e}); fix it or drop --enforce-codex"
+    return None
+
+
 def trust_codex_gate(hooks_path=None, config_path=None):
     """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
     The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
@@ -540,6 +571,12 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
     dsh = enforce and enforce_dsh and host == "deepseek"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
+    if codex:
+        # before the prose writes, not after: a config we cannot parse leaves nothing to fix up,
+        # so every target file keeps its bytes
+        problem = codex_config_problem()
+        if problem:
+            raise EnforcementFailed(problem, {})
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
@@ -558,11 +595,6 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
     if codex:
         _require_file(GATE, results)
         _require_file(GATE_CODEX, results)
-        try:
-            if CODEX_CONFIG.is_file():
-                CODEX_CONFIG.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            raise EnforcementFailed(f"config.toml is not readable ({e})", results)
         try:
             reg = register_codex_gate(CODEX_HOOKS, codex_settings)
             results["~/.codex/hooks.json"] = reg

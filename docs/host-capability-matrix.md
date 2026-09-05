@@ -75,6 +75,16 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   also openai/codex #38168: on Windows a hook command with embedded quotes can silently never run
   while still reporting `Completed` — a live enforcement-integrity trap, though a recorder probe
   confirmed the `&`-prefixed `commandWindows` form does execute on this machine.
+- **Trust-config preflight, and its interpreter boundary.** `trust_codex_gate` edits `config.toml`
+  textually (the stdlib has no TOML writer), so `apply --enforce-codex` validates an existing
+  `config.toml` *before* it writes anything at all — prose files included. A file Codex cannot parse
+  must not be appended to: the append reports trust granted while the hook stays untrusted forever.
+  Unreadable (non-UTF-8, permission-denied) is caught on every supported interpreter. Malformed
+  (`[broken`) is caught only where `tomllib` exists, i.e. Python 3.11+; on 3.9/3.10 `apply` has no
+  TOML parser and none is hand-rolled or added as a dependency, so there the guarantee is
+  readability only and a malformed config is still appended to. Prose-only use (`--no-enforce`, or
+  `--host codex` without `--enforce-codex`) is unaffected on every supported version. Residual limit:
+  the check validates the file as found, not the file as it will be after our append.
 - Scope of the `proven` status: headless `codex exec`. The desktop app-server path was never
   exercised by these proofs and is not claimed.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json

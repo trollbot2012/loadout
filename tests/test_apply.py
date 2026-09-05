@@ -852,17 +852,72 @@ def test_missing_gate_codex_keeps_prose_and_does_not_write_hooks(tmp_path, monke
     assert ei.value.results["AGENTS.md"] == "created"
 
 
-def test_unreadable_codex_trust_config_fails_before_hooks_write(tmp_path, monkeypatch):
+NEEDS_TOMLLIB = pytest.mark.skipif(
+    apply.tomllib is None,
+    reason="malformed-TOML detection needs the stdlib tomllib (3.11+); documented boundary")
+
+
+def _codex_config(tmp_path, monkeypatch, raw):
+    """An isolated CODEX_HOME config.toml holding `raw`, with a LOADOUT.md ready to apply."""
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     cfg = tmp_path / "codex-home" / "config.toml"
     cfg.parent.mkdir(parents=True)
-    cfg.write_bytes(b"\xff\xfe not utf-8")
+    cfg.write_bytes(raw)
     monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    return cfg
+
+
+def test_unreadable_codex_trust_config_fails_before_any_write(tmp_path, monkeypatch):
+    cfg = _codex_config(tmp_path, monkeypatch, b"\xff\xfe not utf-8")
     with pytest.raises(apply.EnforcementFailed) as ei:
         apply.apply(tmp_path, "codex", enforce_codex=True)
-    assert (tmp_path / "AGENTS.md").is_file()
     assert "config.toml" in str(ei.value).lower()
+    assert ei.value.results == {}
+    assert not (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / "codex-home" / "hooks.json").exists()
+    assert cfg.read_bytes() == b"\xff\xfe not utf-8"
+
+
+@NEEDS_TOMLLIB
+def test_malformed_codex_trust_config_fails_before_any_write(tmp_path, monkeypatch):
+    raw = b'[model]\nname = "gpt"\n\n[broken\n'
+    cfg = _codex_config(tmp_path, monkeypatch, raw)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "config.toml" in str(ei.value).lower()
+    assert ei.value.results == {}
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "codex-home" / "hooks.json").exists()
+    assert cfg.read_bytes() == raw  # the foreign [model] table keeps its bytes
+
+
+@NEEDS_TOMLLIB
+def test_malformed_codex_trust_config_exits_2_with_an_actionable_message(tmp_path, monkeypatch, capsys):
+    _codex_config(tmp_path, monkeypatch, b"[broken\n")
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "codex", "--enforce-codex"])
+    with pytest.raises(SystemExit) as ei:
+        apply.main()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "enforcement: skipped" in out and "config.toml" in out and "--enforce-codex" in out
+
+
+def test_codex_config_problem_without_tomllib_still_catches_unreadable_only(tmp_path, monkeypatch):
+    """The 3.9/3.10 boundary: no stdlib TOML parser, so readability is the whole guarantee there."""
+    monkeypatch.setattr(apply, "tomllib", None)
+    unreadable = tmp_path / "bad.toml"
+    unreadable.write_bytes(b"\xff\xfe not utf-8")
+    assert "not readable" in apply.codex_config_problem(unreadable)
+    malformed = tmp_path / "broken.toml"
+    malformed.write_bytes(b"[broken\n")
+    assert apply.codex_config_problem(malformed) is None  # documented limit, not an oversight
+
+
+def test_codex_config_problem_passes_a_readable_valid_or_absent_config(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[model]\nname = "gpt"\n', encoding="utf-8")
+    assert apply.codex_config_problem(cfg) is None
+    assert apply.codex_config_problem(tmp_path / "absent.toml") is None
 
 
 def test_missing_dsh_python_adapter_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch):
