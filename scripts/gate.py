@@ -210,7 +210,7 @@ def bootstrap_invocation(cmd, cwd=None):
             if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
                 return False
             i += 2
-        elif tok == "--no-enforce":
+        elif tok in apply.BOOL_FLAGS:
             i += 1
         elif tok.startswith("-"):
             return False

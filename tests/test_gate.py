@@ -216,9 +216,17 @@ def test_bootstrap_boundary_is_exact_not_blanket(tmp_path):
 def test_bootstrap_invocation_predicate():
     A = str(REPO / "scripts" / "apply.py")
     assert gate.bootstrap_invocation(f'python "{A}" . --host claude-code')
+    assert gate.bootstrap_invocation(f'python "{A}" . --host claude-code --enforce-codex')
+    assert gate.bootstrap_invocation(f'python "{A}" . --host dsh --enforce-dsh')
+    assert gate.bootstrap_invocation(f'python3 "{A}" /p --loadout L.md --no-enforce')
     assert not gate.bootstrap_invocation(f'python "{A}" . | tee log')
     assert not gate.bootstrap_invocation(f'python "{A}" . $(id)')
     assert not gate.bootstrap_invocation(f'python "{A}" . `id`')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host --no-enforce')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host claude-code --evil')
+    assert not gate.bootstrap_invocation(f'python "{A}" . extra')
+    assert not gate.bootstrap_invocation(f'python x/apply.py . --host claude-code')
 
 
 def test_slash_command_counts_as_invoked(tmp_path):

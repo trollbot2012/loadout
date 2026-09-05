@@ -1,5 +1,6 @@
 """Tests for scripts/apply.py: activation and idempotent re-audit of the ## Loadout section."""
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -177,6 +178,16 @@ def test_native_file_table_matches_the_scanner():
 def test_host_aliases_match_the_scanner():
     assert apply.HOST_ALIASES == scan.HOST_ALIASES
     assert apply.KNOWN_HOSTS == frozenset(scan.HOSTS)
+
+
+def test_flag_sets_cover_every_flag_main_reads():
+    assert apply.VALUE_FLAGS == {"--host", "--loadout"}
+    assert apply.BOOL_FLAGS == {"--no-enforce", "--enforce-codex", "--enforce-dsh"}
+    src = Path(apply.__file__).read_text(encoding="utf-8")
+    main = src[src.index("def main():"):]
+    for flag in re.findall(r'"--[a-z0-9-]+"', main):
+        name = flag.strip('"')
+        assert name in apply.VALUE_FLAGS | apply.BOOL_FLAGS, name
 
 
 def test_this_repos_loadout_table_matches_its_accepted_list():

@@ -45,6 +45,7 @@ SETTINGS_LOCAL = ".claude/settings.local.json"
 CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
 DSH_PATCH = Path(os.environ.get("DSH_HOME") or "~/.dsh").expanduser() / "cordis.patch.yml"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
+BOOL_FLAGS = {"--no-enforce", "--enforce-codex", "--enforce-dsh"}  # switches; gate.py allows exactly these
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
 IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
