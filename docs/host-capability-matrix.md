@@ -90,12 +90,21 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   The preflight also distinguishes a genuinely absent config from an existing target that cannot be
   appended to: a directory, device, dangling symlink or symlink-to-directory at the config path is
   rejected before any write (`exists()` alone would read a dangling link as absent). A symlink
-  resolving to a regular file stays supported. Absence is established rather than assumed: the
-  `pathlib` predicates swallow `OSError` into `False`, so a stat the OS refuses and a path that can
-  never hold a file both read as "genuinely absent" through them alone, and the preflight then
-  returned success it had not earned. It now probes with `os.lstat` and, when that fails, decides on
-  the nearest existing ancestor — a config under a regular file is refused (`its parent is not a
-  directory`), an unreadable stat is refused (`it cannot be inspected`), and only a real missing
+  resolving to a regular file stays supported. Absence is established rather than assumed: a
+  refused inspection can read as "genuinely absent" through the `pathlib` predicates, and whether it
+  does is interpreter- and route-dependent rather than universal. On 3.14.6 here, `is_file`,
+  `exists` and `is_symlink` delegate to `os.path`'s `nt._path_*` accelerators, which are documented
+  to answer `False` rather than raise for a path they cannot inspect — a refusal at `os.stat` never
+  reaches them (observed: with `os.stat` mocked to refuse, `is_file` still read `True`). On 3.13.15
+  `is_file`/`exists` go through `Path.stat()` -> `os.stat` and propagate the error instead, which
+  the earlier preflight caught and refused on. The old check was therefore safe on 3.13 and unsafe
+  wherever the predicates answer `False`: there a stat the OS refuses and a path that can never hold
+  a file both read as absent, and the preflight returned success it had not earned. Byte-level,
+  against 7b11934 with that `False` reading forced for the config path only: `apply` returned
+  success and `config.toml` was *replaced* by a bare `[hooks.state]` — a foreign `[model]` table
+  gone at exit 0 — on 3.13.15 and 3.14.6 alike. It now probes with `os.lstat` and, when that fails,
+  decides on the nearest existing ancestor — a config under a regular file is refused (`its parent
+  is not a directory`), an unreadable stat is refused (`it cannot be inspected`), and only a real missing
   path below a real directory is treated as creatable. `FileNotFoundError` alone is not evidence of
   absence: Windows raises it for `<regular file>/config.toml` exactly as it does for a genuine miss,
   which is why the ancestor, not the exception, is what decides. Absent-parent creation is unchanged
@@ -103,8 +112,13 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   file as found, not the file as it will be after our append; the 3.9/3.10 branch is covered by
   forcing `tomllib = None` on a 3.11+ interpreter, not by a real 3.9/3.10 run; the symlink cases are
   skipped on Windows accounts without symlink-creation privilege, so they are unexercised here; and
-  the inspection-denial case is covered by refusing `os.stat`/`os.lstat` for that one path, not by a
-  real permission-denied file. TOCTOU between the preflight and the write is not addressed.
+  the inspection-denial cases are mocked, not real. `os.stat`/`os.lstat` are refused for one path,
+  and the all-false predicate reading is *simulated* by forcing `is_file`/`exists`/`is_symlink` to
+  `False` for that same path: a simulation of the branch, not a native run on an interpreter
+  producing it from a real permission-denied file. On 3.14.6 the `os.stat` refusal alone does not
+  reach the predicates at all — hence the explicit simulation — while it does on 3.13.15. Only
+  3.13.15 and 3.14.6 were run; no other interpreter is claimed. TOCTOU between the preflight and the
+  write is not addressed.
 - Scope of the `proven` status: headless `codex exec`. The desktop app-server path was never
   exercised by these proofs and is not claimed.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json

@@ -338,8 +338,12 @@ def codex_config_problem(path=None):
     absence. Absence itself is not taken on trust either: the path must be one we could actually
     create. The boundary is recorded in docs/host-capability-matrix.md."""
     path = Path(path if path is not None else CODEX_CONFIG)
-    # lstat first, because the pathlib predicates swallow OSError into False: under them a denied
-    # stat and a path that can never exist are both indistinguishable from a genuine absence
+    # lstat first, and directly: what the pathlib predicates make of a refused inspection depends
+    # on the route the interpreter takes -- 3.14.6 answers is_file/exists/is_symlink from os.path's
+    # nt._path_* accelerators, documented to answer False rather than raise for a path they cannot
+    # inspect, while 3.13.15 propagates the error out of Path.stat(). Under the False reading a
+    # denied stat and a path that can never hold a file are both indistinguishable from a genuine
+    # absence, so absence is established here instead of inferred from them
     try:
         os.lstat(path)  # succeeds for a dangling link too: present, and not something we can edit
     except OSError as e:

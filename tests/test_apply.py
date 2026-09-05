@@ -1040,10 +1040,14 @@ def test_symlink_to_a_regular_codex_trust_config_stays_supported(tmp_path, monke
 
 
 def _deny_inspection(monkeypatch, target):
-    """Make every stat of `target` fail with EACCES, deterministically and on any OS/account.
+    """Refuse os.stat/os.lstat for `target` only: a mock, not a real permission-denied file.
 
-    Both calls are patched because the predicates reach the filesystem by different routes
-    (is_file/exists -> os.stat, is_symlink -> os.lstat) and each swallows OSError into False."""
+    What that refusal reaches depends on the interpreter. On 3.13.15 Path.is_file/exists go through
+    Path.stat() -> os.stat and the PermissionError propagates; on 3.14.6 they answer from os.path's
+    nt._path_* accelerators, which never consult os.stat and report False. So this denies the direct
+    os.lstat probe on both, but on 3.14 it does not reach the predicates at all -- forcing that
+    reading is _simulate_all_false_predicates' job. Both calls are patched because stat follows
+    symlinks and lstat does not."""
     real_stat, real_lstat = os.stat, os.lstat
 
     def denied(real):
@@ -1055,6 +1059,25 @@ def _deny_inspection(monkeypatch, target):
 
     monkeypatch.setattr(os, "stat", denied(real_stat))
     monkeypatch.setattr(os, "lstat", denied(real_lstat))
+
+
+def _simulate_all_false_predicates(monkeypatch, target):
+    """Force is_file/exists/is_symlink to False for `target` only -- a simulation of a branch.
+
+    A path whose inspection the OS refuses can read as all-false instead of raising: os.path's
+    isfile/exists/islink (the nt._path_* builtins on both 3.13.15 and 3.14.6) are documented to
+    answer False rather than raise for a path they cannot inspect, and 3.14's pathlib answers these
+    predicates from them. Producing that natively needs a real permission-denied file on such an
+    interpreter, which these tests do not have, so
+    the reading is forced for this one path while every other path answers for real. This models the
+    capability, not a Python version, and is evidence about no interpreter it was not run on."""
+    for name in ("is_file", "exists", "is_symlink"):
+        real = getattr(Path, name)
+
+        def false_for_target(self, *a, _real=real, **kw):
+            return False if self == target else _real(self, *a, **kw)
+
+        monkeypatch.setattr(Path, name, false_for_target)
 
 
 def _file_parent_config(tmp_path, monkeypatch):
@@ -1095,7 +1118,11 @@ def test_codex_trust_config_under_a_file_parent_exits_2(tmp_path, monkeypatch, c
 
 
 def test_codex_trust_config_that_cannot_be_inspected_fails_before_any_write(tmp_path, monkeypatch):
-    """A denied stat must not be read as absence: all-false predicates are not evidence of one."""
+    """A refused os.lstat is classified as uninspectable, not as a creatable absence.
+
+    Direct-denial coverage: it pins how the probe's own error is classified. It says nothing about
+    the predicates, which on 3.13.15 raise here and on 3.14.6 never see the refusal -- the dangerous
+    all-false reading is covered by the simulated control below."""
     cfg = _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
     hooks = _codex_sentinels(tmp_path)
     _deny_inspection(monkeypatch, cfg)
@@ -1104,6 +1131,26 @@ def test_codex_trust_config_that_cannot_be_inspected_fails_before_any_write(tmp_
     assert "cannot be inspected" in str(ei.value) and "--enforce-codex" in str(ei.value)
     assert ei.value.results == {}
     assert cfg.read_bytes() == b'[model]\nname = "gpt"\n'
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+
+
+def test_codex_trust_config_reading_as_absent_under_denial_fails_before_any_write(tmp_path, monkeypatch):
+    """The dangerous branch: inspection refused *and* the predicates reporting False for that path.
+
+    Simulated, not a native run -- see _simulate_all_false_predicates. This is the silent case at
+    7b11934: the preflight returned None, apply reported success, and trust_codex_gate's own
+    is_file() read False too, so it replaced config.toml with a bare [hooks.state] and the foreign
+    [model] table was gone at exit 0. Byte-verified against that source on 3.13.15 and 3.14.6."""
+    cfg = _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
+    hooks = _codex_sentinels(tmp_path)
+    _deny_inspection(monkeypatch, cfg)
+    _simulate_all_false_predicates(monkeypatch, cfg)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "cannot be inspected" in str(ei.value) and "--enforce-codex" in str(ei.value)
+    assert ei.value.results == {}
+    assert cfg.read_bytes() == b'[model]\nname = "gpt"\n'  # the config the base replaced
     assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
     assert hooks.read_bytes() == b'{"hooks": {}}'
 
