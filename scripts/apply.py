@@ -56,6 +56,14 @@ IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
 LINE_RE = re.compile(r"^\s*[-*]\s*([^:`]+?)\s*:\s*`?([^`\s]+)`?", re.M)
 
 
+class EnforcementFailed(ValueError):
+    """Requested enforcement could not register. Prose writes in `results` already happened."""
+    def __init__(self, reason, results):
+        super().__init__(reason)
+        self.reason = reason
+        self.results = results
+
+
 def gate_hooks():
     """Hook registrations for this machine's copy of gate.py (hence settings.local.json)."""
     def cmd(mode):
@@ -445,13 +453,19 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         if other != native and (project / other).is_file():
             results[other] = upsert_native(project / other, blk)
     if gate:
+        if not GATE.is_file():
+            raise EnforcementFailed(f"gate.py not found ({GATE})", results)
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     if codex:
+        if not GATE.is_file():
+            raise EnforcementFailed(f"gate.py not found ({GATE})", results)
         reg = register_codex_gate(CODEX_HOOKS, codex_settings)
         trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
         results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
                                           + " in config.toml (Codex loads hooks at the next session)")
     if dsh:
+        if not DSH_PLUGIN.is_file():
+            raise EnforcementFailed(f"gate_dsh.mjs not found ({DSH_PLUGIN})", results)
         results["~/.dsh/cordis.patch.yml"] = register_dsh_gate() + (
             " (dsh loads the plugin at the next session; there is no per-repo config,"
             " so this registration covers every profile)")
@@ -474,11 +488,20 @@ def main():
         sys.exit(2)
     try:
         results = apply(args[0], host, loadout, enforce, enforce_codex, enforce_dsh)
+    except EnforcementFailed as e:
+        for f, action in e.results.items():
+            print(f"- {f}: {action}")
+        print(f"enforcement: skipped: {e.reason}")
+        sys.exit(2)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
     for f, action in results.items():
         print(f"- {f}: {action}")
+    if any(k in results for k in (SETTINGS_LOCAL, "~/.codex/hooks.json", "~/.dsh/cordis.patch.yml")):
+        print("enforcement: registered — takes effect next session")
+    else:
+        print("enforcement: prose-only")
 
 
 if __name__ == "__main__":

@@ -692,3 +692,63 @@ def test_codex_gate_is_opt_in(tmp_path, codex_hooks):
     assert codex_hooks.is_file()
     # --no-enforce still wins over the opt-in
     assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False, enforce_codex=True)
+
+
+def test_missing_gate_keeps_prose_and_skips_registration(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "GATE", tmp_path / "missing-gate.py")
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "claude-code")
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert (tmp_path / "CLAUDE.md").is_file()
+    assert not (tmp_path / ".claude/settings.local.json").exists()
+    assert "gate.py" in str(ei.value).lower()
+    assert ei.value.results["AGENTS.md"] == "created"
+    assert ei.value.results["CLAUDE.md"] == "created with @AGENTS.md import"
+
+
+def test_missing_gate_main_exits_2_after_prose(tmp_path, monkeypatch, capsys):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "GATE", tmp_path / "missing-gate.py")
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "claude-code"])
+    with pytest.raises(SystemExit) as ei:
+        apply.main()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "- AGENTS.md: created" in out
+    assert "- CLAUDE.md: created with @AGENTS.md import" in out
+    assert "enforcement: skipped:" in out
+    assert "gate.py" in out.lower()
+    assert not (tmp_path / ".claude/settings.local.json").exists()
+
+
+def test_missing_dsh_plugin_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch, capsys):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "DSH_PLUGIN", tmp_path / "missing.mjs")
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "dsh", "--enforce-dsh"])
+    with pytest.raises(SystemExit) as ei:
+        apply.main()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "- AGENTS.md: created" in out
+    assert "enforcement: skipped:" in out
+    assert not dsh_patch.exists()
+    assert (tmp_path / "AGENTS.md").is_file()
+
+
+def test_cli_prints_enforcement_registered_or_prose_only(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude-code"],
+        capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert "enforcement: registered — takes effect next session" in r.stdout
+    dest = tmp_path / "unknown-host"
+    dest.mkdir()
+    (dest / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "apply.py"), str(dest), "--host", "unknown"],
+        capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert "enforcement: prose-only" in r.stdout
+    assert "settings.local.json" not in r.stdout
