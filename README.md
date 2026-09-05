@@ -90,7 +90,11 @@ the rollout transcript, treats `apply_patch` as an edit, and counts a skill as i
 agent actually reads its SKILL.md (a `$name` mention is intent, not invocation). Codex has no
 Stop-block cap of its own and the gate adds none: a session that will not run its stages keeps being
 blocked, and only the operator ends it (`LOADOUT_ENFORCE=0`, interrupt, or remove LOADOUT.md). That
-is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02. Cursor and Grok read Claude-format hooks but are unverified. Every
+is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02.
+DeepSeek Harness: **off by default — pass `--enforce-dsh`.** Registration is machine-wide
+(`$DSH_HOME/cordis.patch.yml`, no per-repo plugin config). Default reapplication neither
+removes nor rewrites an existing entry. Hatch: omit the flag, or pass `--no-enforce`.
+Cursor and Grok read Claude-format hooks but are unverified. Every
 other host keeps prose wiring; see `docs/host-capability-matrix.md`.
 
 Self-install, check and update from a source checkout:

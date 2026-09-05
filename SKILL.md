@@ -212,7 +212,11 @@ On accept, make it stick — three actions:
    helper script run from the shell is opaque to any command-level check. Tell the user in one sentence that the gate takes effect from the next
    session; on every other host say the wiring is prose only. Pass `--no-enforce` only
    if the user asks for prose-only wiring. On Codex the gate is off unless the user asks
-   for it explicitly (`--enforce-codex`); say the wiring is prose only there too.
+   for it explicitly (`--enforce-codex`); say the wiring is prose only there too. On
+   DeepSeek Harness the gate is likewise off unless the user asks (`--enforce-dsh`);
+   that registration is machine-wide (no per-repo plugin config). Default reapplication
+   neither removes nor rewrites an existing `cordis.patch.yml` entry. Hatch: omit the
+   flag, or pass `--no-enforce`.
 
    If Python is unavailable, do the same by
    hand with this block, replacing any existing `## Loadout` section:
@@ -307,7 +311,10 @@ machine-local and gitignored, since it is generated from one machine's skill bod
   a heuristic that can misfire on an innocent command, which the hatch covers.
 - **DeepSeek Harness**: skills live in `~/.dsh/skills` (`$DSH_HOME` overrides). It reads
   project `AGENTS.md` and `CLAUDE.md` natively, so step 5's wiring activates there with
-  no extra file.
+  no extra file. The enforcement plugin is **off by default** — pass `--enforce-dsh`.
+  That writes a user-level `$DSH_HOME/cordis.patch.yml` entry covering every profile
+  (there is no per-repo plugin config). Default reapplication neither removes nor
+  rewrites an existing registration. Hatch: omit the flag, or pass `--no-enforce`.
 - **Codex**: `~/.codex/skills` is legacy but still read; Codex prefers the shared
   `~/.agents/skills`, which the scanner credits to every host whose docs say it
   reads that dir (Codex, Gemini, Cursor, OpenCode, Copilot, Grok, Crush). Claude

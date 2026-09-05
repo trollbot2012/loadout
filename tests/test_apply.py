@@ -583,7 +583,7 @@ def test_dsh_rerun_is_unchanged_and_byte_identical(dsh_patch):
 
 def test_dsh_host_writes_agents_md_and_registers(tmp_path, dsh_patch):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
-    res = apply.apply(tmp_path, "deepseek")
+    res = apply.apply(tmp_path, "deepseek", enforce_dsh=True)
     assert set(res) == {"AGENTS.md", "~/.dsh/cordis.patch.yml"}
     assert res["AGENTS.md"] == "created"
     assert res["~/.dsh/cordis.patch.yml"].startswith("created" + DSH_NOTE)
@@ -591,15 +591,45 @@ def test_dsh_host_writes_agents_md_and_registers(tmp_path, dsh_patch):
     assert "## Loadout" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert dsh_patch.is_file()
     assert not (tmp_path / ".claude").exists() and not (tmp_path / "CLAUDE.md").exists()
-    assert apply.apply(tmp_path, "dsh")["~/.dsh/cordis.patch.yml"].startswith("unchanged" + DSH_NOTE)
+    assert apply.apply(tmp_path, "dsh", enforce_dsh=True)["~/.dsh/cordis.patch.yml"].startswith("unchanged" + DSH_NOTE)
 
 
 def test_dsh_no_enforce_and_other_hosts_skip_registration(tmp_path, dsh_patch, codex_hooks):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
-    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek", enforce=False)
+    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek", enforce=False, enforce_dsh=True)
     assert not dsh_patch.exists()
     assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "codex")
     assert not dsh_patch.exists()
+
+
+def test_dsh_gate_is_opt_in(tmp_path, dsh_patch):
+    """New DSH registration is machine-wide (no per-repo plugin config). Default apply
+    must neither create nor rewrite cordis.patch.yml; --enforce-dsh opts in. Foreign
+    entries survive; --no-enforce still wins."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    res = apply.apply(tmp_path, "deepseek")
+    assert set(res) == {"AGENTS.md"}
+    assert not dsh_patch.exists(), "new DSH registration requires --enforce-dsh"
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "dsh"],
+        capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert "cordis.patch.yml" not in r.stdout
+    assert not dsh_patch.exists()
+
+    foreign = "# top\n- insert:\n    - id: other-plugin\n      name: file:///C:/x/other.mjs\n"
+    dsh_patch.parent.mkdir(parents=True, exist_ok=True)
+    dsh_patch.write_bytes(foreign.encode("utf-8"))
+    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek")
+    assert dsh_text(dsh_patch) == foreign, "reapply without --enforce-dsh must not rewrite existing registrations"
+
+    res = apply.apply(tmp_path, "deepseek", enforce_dsh=True)
+    assert res["~/.dsh/cordis.patch.yml"].startswith("updated" + DSH_NOTE)
+    assert dsh_text(dsh_patch).startswith(foreign)
+    assert "loadout-gate" in dsh_text(dsh_patch)
+    assert "~/.dsh/cordis.patch.yml" not in apply.apply(tmp_path, "deepseek", enforce=False, enforce_dsh=True)
+
+
 def test_trust_codex_gate_drops_its_own_stale_entries_when_the_gate_moves(tmp_path):
     """Regression: trust keys are positional (<event>:<group>:<handler>), but the gate is re-found by
     its "gate.py" command. When another hook is added ahead of it the gate moves, and the entry left at

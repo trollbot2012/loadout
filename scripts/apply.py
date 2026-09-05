@@ -2,6 +2,7 @@
 """loadout apply — persist the accepted loadout into the project's agent instruction files, idempotently.
 
 Usage: python apply.py <project_dir> --host <host> [--loadout LOADOUT.md] [--no-enforce]
+       [--enforce-codex] [--enforce-dsh]
 
 Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'), builds the
 '## Loadout' block and upserts it (replace if present, else append, else create) into:
@@ -17,9 +18,12 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
     upstream reports the same fault with an empty CODEX_HOME and no hooks, so the gate is not the
     known cause — see the crash investigation in docs/host-capability-matrix.md. Without the flag
     --host codex wires the prose section only.
-  - on deepseek/dsh, the gate as a loader patch entry in the user-level $DSH_HOME/cordis.patch.yml
-    (default ~/.dsh): dsh has no per-repo plugin config, and that patch layer is applied after every
-    profile's own, so the one entry covers headless, tui and web alike.
+  - on deepseek/dsh, ONLY with --enforce-dsh, the gate as a loader patch entry in the
+    user-level $DSH_HOME/cordis.patch.yml (default ~/.dsh): dsh has no per-repo plugin
+    config, and that patch layer is applied after every profile's own, so the one entry
+    covers headless, tui and web alike — machine-wide. Default reapplication neither
+    removes nor rewrites an existing registration. Without the flag, --host deepseek/dsh
+    wires the prose section only. Hatch: omit --enforce-dsh, or pass --no-enforce.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -412,7 +416,7 @@ def resolve_host(host):
     raise ValueError(f"unknown host {host!r}; known: {choices} (or unknown)")
 
 
-def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False):
+def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False, enforce_dsh=False):
     project = Path(project)
     host = resolve_host(host)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
@@ -425,7 +429,7 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
     # registered, but the dumps carry no trace of the gate and upstream sees the same fault with
     # no hooks at all (docs/host-capability-matrix.md records the investigation)
     codex = enforce and enforce_codex and host == "codex"
-    dsh = enforce and host in ("deepseek", "dsh")
+    dsh = enforce and enforce_dsh and host == "deepseek"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
@@ -463,12 +467,13 @@ def main():
     loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
     enforce = "--no-enforce" not in argv
     enforce_codex = "--enforce-codex" in argv
+    enforce_dsh = "--enforce-dsh" in argv
     args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     try:
-        results = apply(args[0], host, loadout, enforce, enforce_codex)
+        results = apply(args[0], host, loadout, enforce, enforce_codex, enforce_dsh)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
