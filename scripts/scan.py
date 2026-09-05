@@ -2,9 +2,9 @@
 """loadout scanner — inventory skills/plugins/hooks/commands/agents/MCP across agent harnesses.
 
 Facts only: names, SKILL.md descriptions, registered hooks, enabled/disabled state.
-Never prints credential values. Hook-command masking is best-effort (secret-shaped
-flags and env assignments only); positional secrets and arbitrary names can still
-appear — treat scan output as sensitive. Stdlib only; Python 3.9+; Windows/macOS/Linux.
+Hook-command masking is best-effort for secret-shaped flags and env assignments;
+positional secrets, unquoted edge cases and arbitrary names can still appear —
+treat scan output as sensitive. Stdlib only; Python 3.9+; Windows/macOS/Linux.
 
 Usage:
   python scan.py [--json] [--brief] [project_dir]
@@ -259,14 +259,16 @@ def scan_dir(d):
 
 
 # Best-effort only: secret-shaped flag/env values, not positional or arbitrary names.
+# Unquoted values stop at whitespace or ;|& — not a shell parser. TOKENIZER is not TOKEN.
+_SECRET_WORD = r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTH[_-]?KEY|CREDENTIAL|KEY)"
+_SECRET_VAL = r"(?:'[^']*'|\"[^\"]*\"|[^\s;|&]+)"
 _SECRET_FLAG = re.compile(
     r"(?i)(--(?:[A-Za-z0-9]+[-_])*(?:token|secret|password|passwd|api[-_]?key|"
     r"auth(?:[-_]?key)?|credential|key)s?)"
-    r"(?:(=)((?:'[^']*'|\"[^\"]*\"|\S+))|(\s+)((?:'[^']*'|\"[^\"]*\"|\S+)))")
+    r"(?:(=)(" + _SECRET_VAL + r")|(\s+)(" + _SECRET_VAL + r"))")
 _SECRET_ENV = re.compile(
-    r"(?i)(?<!\S)([A-Za-z_][A-Za-z0-9_]*?(?:TOKEN|SECRET|PASSWORD|PASSWD|"
-    r"API[_-]?KEY|AUTH(?:[_-]?KEY)?|CREDENTIAL|KEY)[A-Za-z0-9_]*)="
-    r"((?:'[^']*'|\"[^\"]*\"|\S+))")
+    r"(?i)(?<!\S)(" + _SECRET_WORD + r"|[A-Za-z_][A-Za-z0-9_]*_" + _SECRET_WORD + r")=("
+    + _SECRET_VAL + r")")
 
 
 def _redact_value(v):

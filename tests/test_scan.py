@@ -482,6 +482,44 @@ def test_short_cmd_masks_secret_shaped_flags_and_env_assignments():
     assert "sekrit" not in scan.short_cmd("--password 'sekrit with spaces'")
     assert "sekrit" not in scan.short_cmd("FOO_TOKEN=sekrit python apply.py")
     assert "sekrit" not in scan.short_cmd('AUTH_KEY="sekrit"')
+    assert "sekrit" not in scan.short_cmd("API_KEY=sekrit")
+    for bare in ("TOKEN", "SECRET", "PASSWORD"):
+        out = scan.short_cmd(f"{bare}=sekrit python apply.py")
+        assert "sekrit" not in out, bare
+        assert "python apply.py" in out, bare
+        assert out.startswith(f"{bare}=")
     benign = scan.short_cmd('python apply.py --host claude-code --loadout LOADOUT.md')
     assert "python apply.py" in benign and "claude-code" in benign and "LOADOUT.md" in benign
     assert "visible-arg" in scan.short_cmd("echo visible-arg")
+    keep = scan.short_cmd("TOKENIZER=keepme python apply.py")
+    assert "keepme" in keep and "python apply.py" in keep
+
+
+def test_short_cmd_stops_unquoted_env_value_at_shell_separator():
+    """Unquoted values end at ;|& or whitespace. Not a shell parser."""
+    out = scan.short_cmd("export FOO_TOKEN=synthetic;python hook.py")
+    assert "synthetic" not in out
+    assert ";python hook.py" in out
+    assert "FOO_TOKEN=" in out
+    assert "python hook.py" in scan.short_cmd("FOO_TOKEN=synthetic python hook.py")
+
+
+def test_hooks_from_data_and_markdown_mask_secret_shaped_commands(tmp_path):
+    """The scan listing path (hooks_from_data → inventory → markdown) must not leak
+    secret-shaped flag/env values from registered hook commands."""
+    h, proj = make_fixture(tmp_path)
+    settings = json.loads((h / ".claude/settings.json").read_text(encoding="utf-8"))
+    settings["hooks"]["PreToolUse"] = [{"hooks": [{
+        "type": "command",
+        "command": "export FOO_TOKEN=synthetic;python hook.py --token supersecretTOKEN123"}]}]
+    write(h / ".claude/settings.json", json.dumps(settings))
+    rows = scan.hooks_from_data(settings, "settings.json")
+    blob = json.dumps(rows)
+    assert "synthetic" not in blob and "supersecretTOKEN123" not in blob
+    assert any("python hook.py" in r["desc"] and "--token" in r["desc"] for r in rows)
+    inv = scan_json(h, proj)
+    dumped = json.dumps(inv)
+    assert "synthetic" not in dumped and "supersecretTOKEN123" not in dumped
+    md = run_scan(h, [str(proj)]).stdout
+    assert "synthetic" not in md and "supersecretTOKEN123" not in md
+    assert "python hook.py" in md and "--token" in md
