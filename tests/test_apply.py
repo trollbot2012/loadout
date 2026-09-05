@@ -753,33 +753,62 @@ def test_dsh_gate_is_opt_in(tmp_path, dsh_patch):
 
 # ------------------------------------------- dsh interpreter agreement (real PATH, real processes)
 
-def _runnable_node():
-    """The node the plugin tests below spawn. `shutil.which` can land on a launcher -- mise's shim
-    is one -- that re-resolves through `mise` on PATH, and those tests replace PATH with a
-    python-only fixture, which is exactly the dependency they strip. So ask the candidate for its
-    own `process.execPath`, the real binary a launcher starts, and keep it only if that binary
-    still runs with PATH constrained the way the fixture constrains it. A launcher is resolved
-    past, never skipped over."""
+def _node_says(argv, env, timeout):
+    """Run a node candidate headless and return (stdout, problem). Every way the run can fail --
+    launch error, timeout, nonzero exit, nothing on stdout -- comes back as a problem string naming
+    the executable and the reason, so none of them can be mistaken for node being absent."""
+    try:
+        r = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+    except subprocess.TimeoutExpired:
+        return "", f"{argv[0]} did not answer {argv[1:]} within {timeout}s"
+    except OSError as e:
+        return "", f"{argv[0]} could not be launched: {e}"
+    if r.returncode != 0:
+        return "", f"{argv[0]} exited {r.returncode} on {argv[1:]}: {r.stderr.strip()[:300]}"
+    if not r.stdout.strip():
+        return "", f"{argv[0]} answered {argv[1:]} with nothing"
+    return r.stdout.strip(), None
+
+
+def _discover_node(timeout=60):
+    """The node the plugin tests below spawn, as (executable, problem). `shutil.which` can land on a
+    launcher -- mise's shim is one -- that re-resolves through `mise` on PATH, and those tests
+    replace PATH with a python-only fixture, which is exactly the dependency they strip. So ask the
+    candidate for its own `process.execPath`, the real binary a launcher starts, and keep it only if
+    that binary still runs with PATH constrained the way the fixture constrains it.
+
+    No node at all is a capability skip. A node that is present but fails either step is a problem,
+    never a skip: it is precisely the state that used to suppress the three checks it breaks, which
+    is how a broken launcher read as a clean run."""
     cand = shutil.which("node")
     if not cand:
-        return None
-    try:
-        r = subprocess.run([cand, "-p", "process.execPath"], capture_output=True,
-                           encoding="utf-8", errors="replace", timeout=60)
-    except OSError:  # pragma: no cover - host dependent
-        return None
-    real = r.stdout.strip()
-    if r.returncode != 0 or not real:  # pragma: no cover - host dependent
-        return None
-    try:
-        probe = subprocess.run([real, "-p", "0"], capture_output=True, encoding="utf-8",
-                               errors="replace", timeout=60, env=dict(os.environ, PATH=""))
-    except OSError:  # pragma: no cover - host dependent
-        return None
-    return real if probe.returncode == 0 else None  # pragma: no branch - host dependent
+        return None, None
+    real, problem = _node_says([cand, "-p", "process.execPath"], os.environ, timeout)
+    if problem:
+        return None, f"node is on PATH but unusable -- {problem}"
+    _, problem = _node_says([real, "-p", "0"], dict(os.environ, PATH=""), timeout)
+    if problem:
+        return None, f"node from {cand} does not run with PATH emptied -- {problem}"
+    return real, None
 
 
-NODE = _runnable_node()
+def _node_or_reason(node, problem):
+    """Absence is a capability skip; present-but-unusable is a failure. Splitting the two is the
+    whole point: a skip on the second would hide the tests that prove interpreter agreement."""
+    if problem:
+        pytest.fail(problem)
+    if not node:
+        pytest.skip("no node on this host")
+    return node
+
+
+NODE, NODE_PROBLEM = _discover_node()
+
+
+@pytest.fixture
+def node():
+    return _node_or_reason(NODE, NODE_PROBLEM)
 
 
 def _shim(directory, name, command):
@@ -948,7 +977,7 @@ def test_dsh_registration_failure_after_prose_reports_the_real_writes(tmp_path, 
     assert "registered" not in out and "cordis.patch.yml: " not in out
 
 
-def _drive_plugin(tmp_path, config, env=None):
+def _drive_plugin(node, tmp_path, config, env=None):
     """Load the real plugin the way dsh does -- by file:// URL, with an entry's `config` -- and put
     one mutating tool through `tools/pre-execute`. Returns (decision, interpreter that ran the gate).
     The gate it spawns is a stand-in that records `sys.executable` and allows."""
@@ -968,27 +997,94 @@ def _drive_plugin(tmp_path, config, env=None):
         "process.stdout.write(JSON.stringify(out ?? null));\n", encoding="utf-8")
     cfg = dict(config)
     cfg.setdefault("gate", str(probe))
-    r = subprocess.run([NODE, str(driver), json.dumps(cfg)], capture_output=True,
+    r = subprocess.run([node, str(driver), json.dumps(cfg)], capture_output=True,
                        encoding="utf-8", errors="replace", timeout=120, cwd=str(tmp_path), env=env)
     assert r.returncode == 0, r.stderr
     ran = record.read_text(encoding="utf-8") if record.is_file() else None
     return json.loads(r.stdout), ran, r.stderr
 
 
-@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
-def test_node_discovery_survives_the_fixture_path(tmp_path):
+def test_node_discovery_survives_the_fixture_path(tmp_path, node):
     """Regression: discovery cached whatever `which` found, and where that was mise's shim the two
     plugin tests below could not start node at all once they had trimmed PATH to their fixture --
     the failure was the harness, not the adapter. Whatever discovery pins must run under that same
     trimmed PATH, and must be the binary that then runs, not a launcher standing in front of it."""
-    r = subprocess.run([NODE, "-p", "process.execPath"], capture_output=True, encoding="utf-8",
+    r = subprocess.run([node, "-p", "process.execPath"], capture_output=True, encoding="utf-8",
                        errors="replace", timeout=60, env=dict(os.environ, PATH=str(tmp_path / "bin")))
     assert r.returncode == 0, f"discovered node does not run under the fixture PATH: {r.stderr[:300]}"
-    assert Path(r.stdout.strip()).samefile(NODE), "discovery must pin the executable that runs"
+    assert Path(r.stdout.strip()).samefile(node), "discovery must pin the executable that runs"
 
 
-@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
-def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monkeypatch, dsh_patch):
+def _fake_node(bin_dir, script, body):
+    """A `node` on a real PATH that is a real process: it launches, runs `body`, and exits for real.
+    Only the answers are chosen -- the launch, the exit status and the pipes are the host's."""
+    script.write_text(body, encoding="utf-8")
+    return _shim(bin_dir, "node", [sys.executable, str(script)])
+
+
+def _unusable_node(kind, bin_dir, tmp_path):
+    """One genuinely unusable `node` per way discovery can be defeated, plus the fragment its report
+    must carry. `hangs` and `reported-binary-hangs` SIMULATE a hang with a short sleep: the caller's
+    1s discovery timeout fires well inside it, so the timeout branch runs without waiting on a real
+    hang. The sleep is kept brief because `subprocess.run` drains the pipes after killing the
+    candidate, and a launcher's own child holds them open past the timeout."""
+    stub, relay_py = tmp_path / "stub.py", tmp_path / "relay.py"
+    if kind == "nonzero":
+        return _fake_node(bin_dir, stub, "raise SystemExit(3)"), "exited 3"
+    if kind == "silent":
+        return _fake_node(bin_dir, stub, "pass\n"), "with nothing"
+    if kind == "unlaunchable":
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        path = bin_dir / ("node.exe" if os.name == "nt" else "node")
+        path.write_bytes(b"this file is not a program\n")
+        if os.name != "nt":
+            path.chmod(0o755)
+        return path, "could not be launched"
+    if kind == "hangs":
+        return _fake_node(bin_dir, stub, "import time\ntime.sleep(3)\n"), "did not answer"
+    # Two-stage: the candidate answers with a second binary, and that one is the broken half -- the
+    # shape of a launcher whose helper is only reachable through the PATH the fixture strips.
+    if kind == "reported-binary-breaks":
+        relay = _shim(bin_dir, "relay", ["loadout-no-such-tool"])
+    else:
+        relay_py.write_text("import time\ntime.sleep(3)\n", encoding="utf-8")
+        relay = _shim(bin_dir, "relay", [sys.executable, str(relay_py)])
+    return _fake_node(bin_dir, stub, f"print({str(relay)!r})\n"), "does not run with PATH emptied"
+
+
+@pytest.mark.parametrize("kind", ["nonzero", "silent", "unlaunchable", "hangs",
+                                  "reported-binary-breaks", "reported-binary-hangs"])
+def test_a_present_but_unusable_node_fails_instead_of_skipping(tmp_path, monkeypatch, kind):
+    """Regression: discovery collapsed every failure into `None`, and `None` meant skip. So a node
+    that was present but broken -- a launcher whose helper had moved, a half-finished install --
+    silently suppressed the three checks that exist to catch exactly that, and the suite still
+    reported a clean run. A rejected candidate must name itself and its reason, and must fail."""
+    bin_dir = tmp_path / "bin"
+    cand, expected = _unusable_node(kind, bin_dir, tmp_path)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.chdir(tmp_path)
+
+    found, problem = _discover_node(timeout=1)
+    assert found is None, "an unusable candidate must not be handed to the plugin tests"
+    assert problem and expected in problem, problem
+    assert str(cand).lower() in problem.lower(), f"the report must name the candidate: {problem}"
+    with pytest.raises(pytest.fail.Exception):
+        _node_or_reason(found, problem)
+
+
+def test_no_node_at_all_stays_a_capability_skip(tmp_path, monkeypatch):
+    """The other half of the contract. Absence has to stay distinguishable from rejection, or the
+    repair would just trade a hidden skip for a failure on every host that has no node at all."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.chdir(empty)
+    assert _discover_node(timeout=1) == (None, None)
+    with pytest.raises(pytest.skip.Exception):
+        _node_or_reason(None, None)
+
+
+def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monkeypatch, dsh_patch, node):
     """End to end on the real artefacts: apply writes the registration on a python3-only PATH, the
     pin is read back out of that file, and the real plugin -- given that entry's config -- spawns
     exactly it. Agreement is proven by the interpreter that actually ran, not by both sides
@@ -1001,19 +1097,18 @@ def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monk
 
     pinned = json.loads(dsh_text(dsh_patch).split("python: ", 1)[1].splitlines()[0])
     assert Path(pinned).samefile(_reported_executable(real))
-    decision, ran, _ = _drive_plugin(tmp_path, {"python": pinned})
+    decision, ran, _ = _drive_plugin(node, tmp_path, {"python": pinned})
     assert ran == pinned, "the plugin ran exactly the interpreter the registration pinned"
     assert decision == {"kind": "allow"}, "a gate that ran and allowed is not a fail-closed deny"
 
 
-@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
-def test_dsh_plugin_falls_back_to_python3_when_python_is_absent(tmp_path, monkeypatch):
+def test_dsh_plugin_falls_back_to_python3_when_python_is_absent(tmp_path, monkeypatch, node):
     """A registration written by hand pins nothing, so the plugin resolves candidates itself. With
     only python3 on PATH the old default `python` failed to spawn and denied every tool call."""
     real = _native_python(tmp_path / "bin", "python3", monkeypatch)
     env = {k: v for k, v in os.environ.items() if k != "LOADOUT_PYTHON"}
     env["PATH"] = str(tmp_path / "bin")
-    decision, ran, stderr = _drive_plugin(tmp_path, {}, env=env)
+    decision, ran, stderr = _drive_plugin(node, tmp_path, {}, env=env)
     assert ran and Path(ran).samefile(_reported_executable(real)), \
         f"plugin did not fall back to python3 (stderr: {stderr[:300]})"
     assert decision == {"kind": "allow"}
