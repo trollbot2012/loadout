@@ -1,5 +1,6 @@
 """Tests for scripts/apply.py: activation and idempotent re-audit of the ## Loadout section."""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -72,6 +73,33 @@ def test_idempotent_rerun(tmp_path):
     snapshot = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert apply.apply(tmp_path, "codex", enforce=False) == {"AGENTS.md": "replaced"}
     assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == snapshot
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_agents_symlink_cannot_redirect_upsert_outside_project(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    outside = tmp_path.parent / "outside-agents.md"
+    outside.write_text("do not overwrite\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to(outside)
+
+    with pytest.raises(OSError, match="symlink or junction"):
+        apply.apply(tmp_path, "codex", enforce=False)
+
+    assert outside.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_symlinked_project_parent_is_rejected(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(project, target_is_directory=True)
+
+    with pytest.raises(OSError, match="symlink or junction"):
+        apply.apply(project_link, "codex", enforce=False)
+
+    assert not (project / "AGENTS.md").exists()
 
 
 def test_native_file_per_host_and_mirroring(tmp_path):

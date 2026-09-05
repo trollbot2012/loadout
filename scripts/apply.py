@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -360,21 +361,87 @@ def write_lf(path, text):
         f.write(text)
 
 
-def upsert_native(path, blk):
+def _is_symlink_or_junction(path):
+    try:
+        info = Path(path).lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _project_destination(project, path):
+    """Validate a project-owned destination and return its canonical parent."""
+    project = Path(project).absolute()
+    path = Path(path).absolute()
+    try:
+        path.relative_to(project)
+    except ValueError:
+        raise OSError(f"refusing to write outside project root: {path}")
+    current = path.parent
+    while True:
+        if _is_symlink_or_junction(current):
+            raise OSError(f"refusing to write through symlink or junction: {current}")
+        if current == project:
+            break
+        if current.parent == current:
+            raise OSError(f"refusing to write outside project root: {path}")
+        current = current.parent
+    if _is_symlink_or_junction(path):
+        raise OSError(f"refusing to write through symlink or junction: {path}")
+    root = project.resolve(strict=True)
+    parent = path.parent.resolve(strict=True)
+    try:
+        parent.relative_to(root)
+    except ValueError:
+        raise OSError(f"refusing to write outside project root: {path}")
+    return parent
+
+
+def write_project_lf(project, path, text):
+    """Write a project file through a verified directory fd without following links."""
+    parent = _project_destination(project, path)
+    if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+        raise OSError("secure no-follow project writes are unsupported on this platform")
+    dir_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+    dir_fd = os.open(parent, dir_flags)
+    try:
+        expected = os.stat(parent, follow_symlinks=False)
+        opened = os.fstat(dir_fd)
+        if (expected.st_dev, expected.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError(f"project destination parent changed while opening: {parent}")
+        _project_destination(project, path)  # re-check immediately before the final open
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        fd = os.open(Path(path).name, flags, 0o666, dir_fd=dir_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"project destination is not a regular file: {path}")
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                fd = None
+                f.write(text)
+        finally:
+            if fd is not None:
+                os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
+def upsert_native(project, path, blk):
     """A CLAUDE.md that imports AGENTS.md stays import-only: the section lives in AGENTS.md,
     and Claude Code would otherwise read it twice. Any duplicate left by an older apply is removed."""
+    _project_destination(project, path)
     if path.name == "CLAUDE.md" and imports_agents(path):
         text = path.read_text(encoding="utf-8", errors="replace")
         m = SECTION_RE.search(text)
         if not m:
             return "imports AGENTS.md (unchanged)"
-        write_lf(path, (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n")
+        write_project_lf(project, path, (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n")
         return "duplicate ## Loadout removed (imports AGENTS.md)"
-    return upsert(path, blk)
+    return upsert(project, path, blk)
 
 
-def upsert(path, blk, create_with=None):
+def upsert(project, path, blk, create_with=None):
     """Replace the ## Loadout section, else append it, else create the file. Returns the action."""
+    _project_destination(project, path)
     if path.is_file():
         text = path.read_text(encoding="utf-8", errors="replace")
         m = SECTION_RE.search(text)
@@ -388,7 +455,7 @@ def upsert(path, blk, create_with=None):
     else:
         new = blk if create_with is None else create_with
         action = "created"
-    path.write_text(new, encoding="utf-8")
+    write_project_lf(project, path, new)
     return action
 
 
@@ -407,18 +474,18 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
     dsh = enforce and host in ("deepseek", "dsh")
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
-    results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
+    results = {"AGENTS.md": upsert(project, project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
         path = project / native
         if host == "claude-code" and not path.is_file():
-            write_lf(path, "@AGENTS.md\n")
+            write_project_lf(project, path, "@AGENTS.md\n")
             results[native] = "created with @AGENTS.md import"
         else:
-            results[native] = upsert_native(path, blk)
+            results[native] = upsert_native(project, path, blk)
     for other in NATIVE.values():
         if other != native and (project / other).is_file():
-            results[other] = upsert_native(project / other, blk)
+            results[other] = upsert_native(project, project / other, blk)
     if gate:
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     if codex:
