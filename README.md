@@ -7,7 +7,7 @@ the best workflow of skills for the project you're building, wires the accepted
 loadout into the project's agent config, and starts the work.
 
 - `SKILL.md` — the skill (portable agent-skills format)
-- `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment)
+- `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment; hook-command masking is best-effort, treat output as sensitive)
 - `scripts/apply.py` — idempotent writer for the `## Loadout` section (AGENTS.md + native file)
 - `scripts/gate.py` — Claude Code hook that makes the accepted loadout binding (deny edits before stage 1, block stopping while a binding stage is missing)
 

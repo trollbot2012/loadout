@@ -48,7 +48,9 @@ The output is ordered by decision relevance:
 
 Flags: `--brief` (current host + project only, first sentence of each description; run this first when
 the host has more than ~50 skills), `--json`. The scanner reads names,
-frontmatter and config keys only, never credential values.
+frontmatter and config keys only, never credential values. Hook-command masking is
+best-effort (secret-shaped flags and env assignments); positional secrets and arbitrary
+names can still appear — treat scan output as sensitive.
 
 ### 2. Classify the project (facts)
 

@@ -2,7 +2,9 @@
 """loadout scanner — inventory skills/plugins/hooks/commands/agents/MCP across agent harnesses.
 
 Facts only: names, SKILL.md descriptions, registered hooks, enabled/disabled state.
-Never prints credential values. Stdlib only; Python 3.9+; Windows/macOS/Linux.
+Never prints credential values. Hook-command masking is best-effort (secret-shaped
+flags and env assignments only); positional secrets and arbitrary names can still
+appear — treat scan output as sensitive. Stdlib only; Python 3.9+; Windows/macOS/Linux.
 
 Usage:
   python scan.py [--json] [--brief] [project_dir]
@@ -256,8 +258,28 @@ def scan_dir(d):
     return out
 
 
+# Best-effort only: secret-shaped flag/env values, not positional or arbitrary names.
+_SECRET_FLAG = re.compile(
+    r"(?i)(--(?:[A-Za-z0-9]+[-_])*(?:token|secret|password|passwd|api[-_]?key|"
+    r"auth(?:[-_]?key)?|credential|key)s?)"
+    r"(?:(=)((?:'[^']*'|\"[^\"]*\"|\S+))|(\s+)((?:'[^']*'|\"[^\"]*\"|\S+)))")
+_SECRET_ENV = re.compile(
+    r"(?i)(?<!\S)([A-Za-z_][A-Za-z0-9_]*?(?:TOKEN|SECRET|PASSWORD|PASSWD|"
+    r"API[_-]?KEY|AUTH(?:[_-]?KEY)?|CREDENTIAL|KEY)[A-Za-z0-9_]*)="
+    r"((?:'[^']*'|\"[^\"]*\"|\S+))")
+
+
+def _redact_value(v):
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        return v[0] + "***" + v[-1]
+    return "***"
+
+
 def short_cmd(cmd):
-    return re.sub(r"\s+", " ", str(cmd)).strip()[:80]
+    s = re.sub(r"\s+", " ", str(cmd)).strip()
+    s = _SECRET_FLAG.sub(lambda m: m.group(1) + (m.group(2) or m.group(4)) + _redact_value(m.group(3) or m.group(5)), s)
+    s = _SECRET_ENV.sub(lambda m: m.group(1) + "=" + _redact_value(m.group(2)), s)
+    return s[:80]
 
 
 def hooks_from_data(data, source):

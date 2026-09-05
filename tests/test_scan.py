@@ -471,3 +471,17 @@ def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):
     out = run_scan(h, [str(proj)], host="codex").stdout  # claude-code is now a foreign host
     assert "- hooks: PostToolUse, SessionStart ×3\n" in out
     assert "SessionStart, SessionStart" not in out
+
+
+def test_short_cmd_masks_secret_shaped_flags_and_env_assignments():
+    """Best-effort masking of secret-shaped flags/env, not an escape-proof guarantee.
+    Positional secrets and arbitrary names stay visible; command identity stays intact."""
+    assert "supersecretTOKEN123" not in scan.short_cmd("--token supersecretTOKEN123")
+    assert scan.short_cmd("--token supersecretTOKEN123").startswith("--token")
+    assert "sekrit" not in scan.short_cmd("--api-key=sekrit")
+    assert "sekrit" not in scan.short_cmd("--password 'sekrit with spaces'")
+    assert "sekrit" not in scan.short_cmd("FOO_TOKEN=sekrit python apply.py")
+    assert "sekrit" not in scan.short_cmd('AUTH_KEY="sekrit"')
+    benign = scan.short_cmd('python apply.py --host claude-code --loadout LOADOUT.md')
+    assert "python apply.py" in benign and "claude-code" in benign and "LOADOUT.md" in benign
+    assert "visible-arg" in scan.short_cmd("echo visible-arg")
