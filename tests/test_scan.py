@@ -312,6 +312,17 @@ def test_nonexistent_project_dir_fails(tmp_path):
     assert r.returncode == 2 and "project dir not found" in r.stderr
 
 
+def test_scan_help_is_usage_not_inventory(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    r = run_scan(h, ["--help", str(proj)])
+    assert r.returncode == 0, r.stderr
+    assert "Usage:" in r.stdout
+    assert "python scan.py" in r.stdout
+    assert "Running inside" not in r.stdout
+    assert len(r.stdout) < 2000
+    assert "Traceback" not in r.stderr
+
+
 def test_prior_loadout_detected_for_reaudit(tmp_path):
     h, proj = make_fixture(tmp_path)
     write(proj / "LOADOUT.md", "# Loadout: x\nHarness: claude-code\nDate: 2026-08-31\n\n## Accepted\n- plan: `p`\n")

@@ -141,6 +141,28 @@ def test_cli(tmp_path):
     assert r.returncode == 2
 
 
+def test_apply_help_exits_0_with_usage(tmp_path):
+    r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), "--help"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert "Usage:" in r.stdout
+    assert "apply.py" in r.stdout
+    assert "Traceback" not in r.stderr
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_apply_valueless_flags_exit_2_without_traceback(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    for args in (["--host"], [str(tmp_path), "--host"], [str(tmp_path), "--loadout"],
+                 [str(tmp_path), "--host", "--no-enforce"]):
+        r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), *args],
+                           capture_output=True, encoding="utf-8")
+        assert r.returncode == 2, args
+        assert "Traceback" not in r.stderr
+        assert "Usage:" in r.stderr or "needs a value" in r.stderr or "apply:" in r.stderr
+        assert not (tmp_path / "AGENTS.md").exists(), args
+
+
 def test_cli_host_claude_alias_writes_claude_md_and_registers_gate(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude"],
@@ -212,6 +234,8 @@ def test_flag_sets_cover_every_flag_main_reads():
     main = src[src.index("def main():"):]
     for flag in re.findall(r'"--[a-z0-9-]+"', main):
         name = flag.strip('"')
+        if name == "--help":
+            continue  # usage only; not a gate-allowed apply switch
         assert name in apply.VALUE_FLAGS | apply.BOOL_FLAGS, name
 
 

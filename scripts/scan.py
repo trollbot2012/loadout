@@ -844,6 +844,9 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
+    if "--help" in argv:
+        print(__doc__)
+        return
     hosts_arg = None
     if "--hosts" in argv:
         i = argv.index("--hosts")

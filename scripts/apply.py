@@ -50,6 +50,18 @@ CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "h
 DSH_PATCH = Path(os.environ.get("DSH_HOME") or "~/.dsh").expanduser() / "cordis.patch.yml"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 BOOL_FLAGS = {"--no-enforce", "--enforce-codex", "--enforce-dsh"}  # switches; gate.py allows exactly these
+
+
+def _cli_value(argv, flag, default=None):
+    """Next token after `flag`, or `default` when absent. A missing token or another flag is an error."""
+    if flag not in argv:
+        return default
+    i = argv.index(flag)
+    if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+        raise ValueError(f"{flag} needs a value")
+    return argv[i + 1]
+
+
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
 ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
 IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
@@ -479,8 +491,15 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
-    host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
-    loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
+    if "--help" in argv:
+        print(__doc__)
+        return
+    try:
+        host = _cli_value(argv, "--host", "unknown")
+        loadout = _cli_value(argv, "--loadout", "LOADOUT.md")
+    except ValueError as e:
+        print(f"apply: {e}", file=sys.stderr)
+        sys.exit(2)
     enforce = "--no-enforce" not in argv
     enforce_codex = "--enforce-codex" in argv
     enforce_dsh = "--enforce-dsh" in argv
