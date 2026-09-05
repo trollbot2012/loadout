@@ -37,9 +37,10 @@ PATCH_FILE_RE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+
 CODEX_SURFACE = {"hooks.json", "config.toml"}  # operator-owned only under a .codex directory
 DSH_SURFACE = {"settings.yaml", "package.json"}  # operator-owned only under a .dsh directory
 DELEGATION_TOOLS = {"Agent", "Task"}  # a delegated edit is still an edit of this session
-MCP_MUTATING_RE = re.compile(
-    r"^mcp__.*(?:write|create|edit|delete|remove|exec|run|bash|workbench|upload|update|apply|move|rename|save|patch)",
-    re.I)
+MCP_MUTATING = frozenset({
+    "write", "create", "edit", "delete", "remove", "exec", "run", "bash",
+    "workbench", "upload", "update", "apply", "move", "rename", "save", "patch",
+})
 SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py",
                  "cordis.patch.yml", "cordis.yml", "gate_dsh.mjs"}  # lower-cased; the cordis files are dsh loader config
 COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
@@ -94,7 +95,15 @@ def sensitive(cmd):
 
 
 def is_edit_tool(tool):
-    return tool in EDIT_TOOLS or bool(MCP_MUTATING_RE.match(tool or ""))
+    """True for native edit tools and MCP tools whose last `__` action token is mutating.
+    Token match, not substring: `run_workflow` mutates, `list_workflow_runs` does not."""
+    if tool in EDIT_TOOLS:
+        return True
+    name = tool or ""
+    if not name.lower().startswith("mcp__"):
+        return False
+    action = name.rsplit("__", 1)[-1].lower()
+    return any(action == verb or action.startswith(verb + "_") for verb in MCP_MUTATING)
 
 
 def transcript_facts(path):
@@ -312,7 +321,8 @@ def decide(mode, hook, env=None, host=None):
         return None
     try:
         stages = binding_stages(loadout.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+    except OSError as e:
+        sys.stderr.write(f"loadout gate: unreadable policy {loadout}: {e}\n")
         return None
     if not stages:
         return None

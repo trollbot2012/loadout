@@ -29,6 +29,15 @@ def test_write_shaped_bash_commands():
     assert not gate.write_shaped("git status --short")
 
 
+def test_mcp_action_tokens_not_substring_run():
+    assert not gate.is_edit_tool("mcp__github__list_workflow_runs")
+    assert not gate.is_edit_tool("mcp__x__runner_status")
+    assert gate.is_edit_tool("mcp__github__run_workflow")
+    assert gate.is_edit_tool("mcp__fs__write_file")
+    assert gate.is_edit_tool("mcp__x__create_issue")
+    assert not gate.is_edit_tool("mcp__fs__read_file")
+
+
 def transcript(tmp_path, blocks, name="t.jsonl", cwd=None):
     """Write a JSONL transcript. Each item is a list of content blocks for one assistant turn,
     or a plain string for a user turn. `cwd` stamps the session's starting directory, which the
@@ -277,6 +286,35 @@ def test_stop_blocks_only_after_edits_and_names_missing_stages(tmp_path):
     assert "unlazy" not in out["reason"], "situational stages are not binding"
     t = transcript(tmp_path, [[skill("planner")], [skill("reviewer")], [tool("Edit", file_path="a.py")]])
     assert run_gate("stop", stop_hook(proj, t)) is None
+
+
+def test_list_workflow_runs_does_not_arm_stop(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[skill("planner")],
+                              [tool("mcp__github__list_workflow_runs")]])
+    assert gate.transcript_facts(t).edited is False
+    assert run_gate("stop", stop_hook(proj, t)) is None
+    t = transcript(tmp_path, [[skill("planner")],
+                              [tool("mcp__github__run_workflow")]])
+    assert gate.transcript_facts(t).edited is True
+    out = run_gate("stop", stop_hook(proj, t))
+    assert out and out["decision"] == "block"
+
+
+def test_unreadable_policy_warns_and_keeps_host_semantics(tmp_path, monkeypatch, capsys):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[tool("Edit", file_path="a.py")]])
+    orig = Path.read_text
+
+    def boom(self, *a, **k):
+        if self.name == "LOADOUT.md":
+            raise OSError("denied")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert gate.decide("pre", pre_hook(proj, t)) is None
+    err = capsys.readouterr().err
+    assert "unreadable policy" in err and "LOADOUT.md" in err
 
 
 def test_silent_allow_without_loadout_or_with_hatch(tmp_path):
