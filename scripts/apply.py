@@ -63,9 +63,10 @@ def _cli_value(argv, flag, default=None):
 
 
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
-ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
+ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^#{1,6} |\Z)", re.M | re.S)
 IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
 LINE_RE = re.compile(r"^\s*[-*]\s*([^:`]+?)\s*:\s*`?([^`\s]+)`?", re.M)
+_PLACEHOLDER = re.compile(r"^<[^>]+>$")
 
 
 class EnforcementFailed(ValueError):
@@ -369,7 +370,13 @@ def parse_accepted(text):
     m = ACCEPTED_RE.search(text)
     if not m:
         return []
-    return [(stage.strip(), skill.strip()) for stage, skill in LINE_RE.findall(m.group(0))]
+    out = []
+    for stage, skill in LINE_RE.findall(m.group(0)):
+        stage, skill = stage.strip(), skill.strip()
+        if _PLACEHOLDER.match(stage) or _PLACEHOLDER.match(skill):
+            continue
+        out.append((stage, skill))
+    return out
 
 
 def block(accepted):

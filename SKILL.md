@@ -185,7 +185,9 @@ auto-trigger exemption: a skill that self-triggers is still listed, with that no
 - Otherwise, print a numbered list and ask the user to reply with numbers,
   "all", or "none".
 
-On accept, make it stick — three actions:
+On accept, make it stick — three actions. If the user accepts none, still write
+`LOADOUT.md` with an empty `## Accepted` section and skip apply/gate (do not
+run `apply.py`); the empty-Accepted guard in apply is the backstop.
 
 1. **Write `LOADOUT.md`** at the project root: the report with the `## Accepted`
    section filled in as `- <stage>: \`<skill>\`` lines. On a re-audit, overwrite the

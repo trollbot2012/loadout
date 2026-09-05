@@ -131,6 +131,28 @@ def test_missing_accepted_is_an_error(tmp_path):
         apply.apply(tmp_path, "claude-code")
 
 
+def test_parse_accepted_stops_at_any_heading_and_keeps_dash_and_pipe():
+    text = ("# Loadout\n\n## Accepted\n"
+            "- planning: `planner`\n- review: reviewer\n"
+            "- situational, gated work: `unlazy`\n\n"
+            "| stage | skill |\n|---|---|\n| leak | tableskill |\n"
+            "### Notes\n- leak: `badskill`\n"
+            "## Skip\n- skipstage: `skipped`\n")
+    assert apply.parse_accepted(text) == [
+        ("planning", "planner"), ("review", "reviewer"), ("situational, gated work", "unlazy")]
+
+
+def test_parse_accepted_rejects_template_placeholders_and_apply_stays_empty_guard(tmp_path):
+    template = ("# Loadout\n\n## Accepted\n"
+                "- <stage>: `<skill>`        <- filled in at step 5; exactly this line format\n"
+                "- situational, <when>: `<skill>`   <- accepted but not binding on the gate\n")
+    assert apply.parse_accepted(template) == []
+    (tmp_path / "LOADOUT.md").write_text(template, encoding="utf-8")
+    with pytest.raises(ValueError, match="Accepted"):
+        apply.apply(tmp_path, "claude-code")
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
 def test_cli(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude-code"],
