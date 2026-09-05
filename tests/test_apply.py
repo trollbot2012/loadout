@@ -244,13 +244,27 @@ def test_claude_md_with_agents_import_stays_import_only(tmp_path):
     assert (tmp_path / "CLAUDE.md").read_bytes() == first, "re-apply must be byte-identical"
     assert res["CLAUDE.md"] == "imports AGENTS.md (unchanged)"
     # a duplicate block left behind by an older apply is removed, not retained
-    (tmp_path / "CLAUDE.md").write_text("@AGENTS.md\n\n" + apply.block([("planning", "planner")]), encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_bytes(
+        ("@AGENTS.md\n\n" + apply.block([("planning", "planner")])).encode("utf-8"))
     res = apply.apply(tmp_path, "claude-code")
     assert (tmp_path / "CLAUDE.md").read_bytes() == first
     assert res["CLAUDE.md"] == "duplicate ## Loadout removed (imports AGENTS.md)"
     # mirroring from another host respects the import as well
     res = apply.apply(tmp_path, "gemini")
     assert (tmp_path / "CLAUDE.md").read_bytes() == first and res["CLAUDE.md"] == "imports AGENTS.md (unchanged)"
+
+
+def test_upsert_native_import_duplicate_preserves_crlf(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    blk = apply.block([("planning", "planner")]).replace("\n", "\r\n").encode("utf-8")
+    (tmp_path / "CLAUDE.md").write_bytes(b"@AGENTS.md\r\n\r\n" + blk + b"\r\n## After\r\nkeep me\r\n")
+    res = apply.apply(tmp_path, "claude-code")
+    raw = (tmp_path / "CLAUDE.md").read_bytes()
+    assert res["CLAUDE.md"] == "duplicate ## Loadout removed (imports AGENTS.md)"
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    assert raw.startswith(b"@AGENTS.md\r\n")
+    assert b"## Loadout" not in raw
+    assert raw.endswith(b"## After\r\nkeep me\r\n")
 
 
 def test_native_file_table_matches_the_scanner():

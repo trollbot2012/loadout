@@ -438,11 +438,15 @@ def upsert_native(path, blk):
     """A CLAUDE.md that imports AGENTS.md stays import-only: the section lives in AGENTS.md,
     and Claude Code would otherwise read it twice. Any duplicate left by an older apply is removed."""
     if path.name == "CLAUDE.md" and imports_agents(path):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
+        nl = "\r\n" if b"\r\n" in raw else "\n"
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         m = SECTION_RE.search(text)
         if not m:
             return "imports AGENTS.md (unchanged)"
-        write_lf(path, (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n")
+        new = (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n"
+        with path.open("w", encoding="utf-8", newline="") as f:
+            f.write(new.replace("\n", nl))
         return "duplicate ## Loadout removed (imports AGENTS.md)"
     return upsert(path, blk)
 
