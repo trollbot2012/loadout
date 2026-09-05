@@ -753,7 +753,33 @@ def test_dsh_gate_is_opt_in(tmp_path, dsh_patch):
 
 # ------------------------------------------- dsh interpreter agreement (real PATH, real processes)
 
-NODE = shutil.which("node")
+def _runnable_node():
+    """The node the plugin tests below spawn. `shutil.which` can land on a launcher -- mise's shim
+    is one -- that re-resolves through `mise` on PATH, and those tests replace PATH with a
+    python-only fixture, which is exactly the dependency they strip. So ask the candidate for its
+    own `process.execPath`, the real binary a launcher starts, and keep it only if that binary
+    still runs with PATH constrained the way the fixture constrains it. A launcher is resolved
+    past, never skipped over."""
+    cand = shutil.which("node")
+    if not cand:
+        return None
+    try:
+        r = subprocess.run([cand, "-p", "process.execPath"], capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+    except OSError:  # pragma: no cover - host dependent
+        return None
+    real = r.stdout.strip()
+    if r.returncode != 0 or not real:  # pragma: no cover - host dependent
+        return None
+    try:
+        probe = subprocess.run([real, "-p", "0"], capture_output=True, encoding="utf-8",
+                               errors="replace", timeout=60, env=dict(os.environ, PATH=""))
+    except OSError:  # pragma: no cover - host dependent
+        return None
+    return real if probe.returncode == 0 else None  # pragma: no branch - host dependent
+
+
+NODE = _runnable_node()
 
 
 def _shim(directory, name, command):
@@ -949,7 +975,19 @@ def _drive_plugin(tmp_path, config, env=None):
     return json.loads(r.stdout), ran, r.stderr
 
 
-@pytest.mark.skipif(not NODE, reason="node is not installed on this host")
+@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
+def test_node_discovery_survives_the_fixture_path(tmp_path):
+    """Regression: discovery cached whatever `which` found, and where that was mise's shim the two
+    plugin tests below could not start node at all once they had trimmed PATH to their fixture --
+    the failure was the harness, not the adapter. Whatever discovery pins must run under that same
+    trimmed PATH, and must be the binary that then runs, not a launcher standing in front of it."""
+    r = subprocess.run([NODE, "-p", "process.execPath"], capture_output=True, encoding="utf-8",
+                       errors="replace", timeout=60, env=dict(os.environ, PATH=str(tmp_path / "bin")))
+    assert r.returncode == 0, f"discovered node does not run under the fixture PATH: {r.stderr[:300]}"
+    assert Path(r.stdout.strip()).samefile(NODE), "discovery must pin the executable that runs"
+
+
+@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
 def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monkeypatch, dsh_patch):
     """End to end on the real artefacts: apply writes the registration on a python3-only PATH, the
     pin is read back out of that file, and the real plugin -- given that entry's config -- spawns
@@ -968,7 +1006,7 @@ def test_dsh_plugin_launches_exactly_the_interpreter_apply_pinned(tmp_path, monk
     assert decision == {"kind": "allow"}, "a gate that ran and allowed is not a fail-closed deny"
 
 
-@pytest.mark.skipif(not NODE, reason="node is not installed on this host")
+@pytest.mark.skipif(not NODE, reason="no directly runnable node on this host")
 def test_dsh_plugin_falls_back_to_python3_when_python_is_absent(tmp_path, monkeypatch):
     """A registration written by hand pins nothing, so the plugin resolves candidates itself. With
     only python3 on PATH the old default `python` failed to spawn and denied every tool call."""
