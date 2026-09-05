@@ -17,13 +17,16 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
     gate was registered. A later minidump investigation found no trace of the gate in any dump, and
     upstream reports the same fault with an empty CODEX_HOME and no hooks, so the gate is not the
     known cause — see the crash investigation in docs/host-capability-matrix.md. Without the flag
-    --host codex wires the prose section only.
+    --host codex writes the prose section and skips registration this invocation; an existing
+    hooks.json entry is left as-is. Skip registration with --no-enforce. Runtime hatch:
+    LOADOUT_ENFORCE=0.
   - on deepseek/dsh, ONLY with --enforce-dsh, the gate as a loader patch entry in the
     user-level $DSH_HOME/cordis.patch.yml (default ~/.dsh): dsh has no per-repo plugin
     config, and that patch layer is applied after every profile's own, so the one entry
     covers headless, tui and web alike — machine-wide. Default reapplication neither
     removes nor rewrites an existing registration. Without the flag, --host deepseek/dsh
-    wires the prose section only. Hatch: omit --enforce-dsh, or pass --no-enforce.
+    writes the prose section and skips registration this invocation. Skip registration
+    with --no-enforce. Runtime hatch: LOADOUT_ENFORCE=0.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
@@ -466,7 +469,7 @@ def upsert(path, blk, create_with=None):
 
 
 def resolve_host(host):
-    """Documented aliases → table key. `unknown` and known generic hosts stay prose-only.
+    """Documented aliases → table key. `unknown` and known generic hosts skip registration.
     An explicit misspelling is an error, not a silent fallback."""
     key = (host or "unknown").strip().lower() or "unknown"
     key = HOST_ALIASES.get(key, key)
@@ -493,6 +496,25 @@ def _dsh_python():
         found = shutil.which(cand)
         if found:
             return found
+    return None
+
+
+def existing_registration(project, host):
+    """On-disk gate entry for this host, if readable. Presence is not proof it is active."""
+    host = resolve_host(host)
+    try:
+        if host == "claude-code":
+            p = Path(project) / SETTINGS_LOCAL
+            if p.is_file() and "gate.py" in p.read_text(encoding="utf-8", errors="replace"):
+                return SETTINGS_LOCAL
+        elif host == "codex":
+            if CODEX_HOOKS.is_file() and "gate.py" in CODEX_HOOKS.read_text(encoding="utf-8", errors="replace"):
+                return "~/.codex/hooks.json"
+        elif host == "deepseek":
+            if DSH_PATCH.is_file() and "gate_dsh.mjs" in DSH_PATCH.read_text(encoding="utf-8", errors="replace"):
+                return "~/.dsh/cordis.patch.yml"
+    except OSError:
+        return None
     return None
 
 
@@ -589,7 +611,11 @@ def main():
     if any(k in results for k in (SETTINGS_LOCAL, "~/.codex/hooks.json", "~/.dsh/cordis.patch.yml")):
         print("enforcement: registered — takes effect next session")
     else:
-        print("enforcement: prose-only")
+        line = "enforcement: skipped this invocation"
+        preserved = existing_registration(args[0], parsed["host"])
+        if preserved:
+            line += f"; existing registration preserved ({preserved})"
+        print(line)
 
 
 if __name__ == "__main__":

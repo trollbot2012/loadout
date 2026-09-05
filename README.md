@@ -83,7 +83,8 @@ Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 a reg
 the desktop app's `app-server` child (hard abort about 20s after every launch, no respawn, every
 request then failing with "Codex app-server process is not available"); a schema-correct nested
 entry did it as readily as the malformed root-level one an older version wrote, so the cause is not
-yet understood and the wiring stays prose-only unless asked for. With the flag,
+yet understood and registration is skipped this invocation unless asked for. An existing
+hooks.json entry is left as-is; that is not a claim that enforcement is active or disabled. With the flag,
 `apply.py --host codex --enforce-codex` registers the gate in the user-level `~/.codex/hooks.json`
 and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads
 the rollout transcript, treats `apply_patch` as an edit, and counts a skill as invoked only when the
@@ -93,9 +94,11 @@ blocked, and only the operator ends it (`LOADOUT_ENFORCE=0`, interrupt, or remov
 is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02.
 DeepSeek Harness: **off by default — pass `--enforce-dsh`.** Registration is machine-wide
 (`$DSH_HOME/cordis.patch.yml`, no per-repo plugin config). Default reapplication neither
-removes nor rewrites an existing entry. Hatch: omit the flag, or pass `--no-enforce`.
+removes nor rewrites an existing entry. Skip registration this invocation by omitting
+the flag, or pass `--no-enforce`. Runtime hatch: `LOADOUT_ENFORCE=0`. An existing
+entry is left as-is; that is not a claim that enforcement is active or disabled.
 Cursor and Grok read Claude-format hooks but are unverified. Every
-other host keeps prose wiring; see `docs/host-capability-matrix.md`.
+other host skips registration this invocation; see `docs/host-capability-matrix.md`.
 
 Self-install, check and update from a source checkout:
 

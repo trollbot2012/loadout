@@ -140,7 +140,7 @@ Rules:
 # Loadout: <project name>
 Harness: <detected> | Project type: <classification>
 Date: <YYYY-MM-DD>
-Enforcement: claude-code gate registered | prose only
+Enforcement: claude-code gate registered | skipped this invocation
 Supersedes: loadout of <prior date>        <- only on a re-audit
 
 ## Recommended workflow (skills only; these become the Accepted stages)
@@ -211,14 +211,16 @@ run `apply.py`); the empty-Accepted guard in apply is the backstop.
    command, before the stage-1 skill has been invoked, and cannot stop while a binding
    stage (any Accepted line not labelled `situational`) was never invoked. This makes
    the workflow binding; it is not an OS security boundary, since after stage 1 a
-   helper script run from the shell is opaque to any command-level check. Tell the user in one sentence that the gate takes effect from the next
-   session; on every other host say the wiring is prose only. Pass `--no-enforce` only
-   if the user asks for prose-only wiring. On Codex the gate is off unless the user asks
-   for it explicitly (`--enforce-codex`); say the wiring is prose only there too. On
-   DeepSeek Harness the gate is likewise off unless the user asks (`--enforce-dsh`);
+   helper script run from the shell is opaque to any command-level check. Tell the user in one sentence that a successful registration takes effect from the next
+   session; when registration is skipped this invocation, say that, and if an existing
+   registration is still on disk say it was preserved — do not call that active or disabled
+   enforcement. Pass `--no-enforce` only
+   if the user asks to skip registration. On Codex the gate is not registered unless the user asks
+   for it explicitly (`--enforce-codex`); skip registration this invocation there too. On
+   DeepSeek Harness the gate is likewise not registered unless the user asks (`--enforce-dsh`);
    that registration is machine-wide (no per-repo plugin config). Default reapplication
-   neither removes nor rewrites an existing `cordis.patch.yml` entry. Hatch: omit the
-   flag, or pass `--no-enforce`.
+   neither removes nor rewrites an existing `cordis.patch.yml` entry. Skip registration
+   this invocation by omitting the flag, or pass `--no-enforce`. Runtime hatch: `LOADOUT_ENFORCE=0`.
 
    If Python is unavailable, do the same by
    hand with this block, replacing any existing `## Loadout` section:
@@ -304,7 +306,8 @@ machine-local and gitignored, since it is generated from one machine's skill bod
   gate crashed the desktop app's app-server ~20s after every launch (see README). With that flag it
   writes the user-level `~/.codex/hooks.json` plus a trust grant in `config.toml`, loaded at the next
   session; on Codex a skill counts as invoked only when its SKILL.md is actually read, and there is
-  no block cap, so a stuck session is ended by the operator, not the gate. Other hosts are prose only
+  no block cap, so a stuck session is ended by the operator, not the gate. Other hosts skip
+  registration this invocation
   until `docs/host-capability-matrix.md` says proven. Operator hatch:
   `LOADOUT_ENFORCE=0` or remove LOADOUT.md; there is no agent-side override, and
   writes to LOADOUT.md, AGENTS.md or CLAUDE.md are gated like any other edit (only an
@@ -316,7 +319,8 @@ machine-local and gitignored, since it is generated from one machine's skill bod
   no extra file. The enforcement plugin is **off by default** — pass `--enforce-dsh`.
   That writes a user-level `$DSH_HOME/cordis.patch.yml` entry covering every profile
   (there is no per-repo plugin config). Default reapplication neither removes nor
-  rewrites an existing registration. Hatch: omit the flag, or pass `--no-enforce`.
+  rewrites an existing registration. Skip registration this invocation by omitting
+  the flag, or pass `--no-enforce`. Runtime hatch: `LOADOUT_ENFORCE=0`.
 - **Codex**: `~/.codex/skills` is legacy but still read; Codex prefers the shared
   `~/.agents/skills`, which the scanner credits to every host whose docs say it
   reads that dir (Codex, Gemini, Cursor, OpenCode, Copilot, Grok, Crush). Claude

@@ -1,5 +1,6 @@
 """Tests for scripts/apply.py: activation and idempotent re-audit of the ## Loadout section."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -878,7 +879,7 @@ def test_missing_dsh_plugin_keeps_prose_and_does_not_write_patch(tmp_path, dsh_p
     assert (tmp_path / "AGENTS.md").is_file()
 
 
-def test_cli_prints_enforcement_registered_or_prose_only(tmp_path):
+def test_cli_prints_enforcement_registered_or_skipped(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     r = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude-code"],
@@ -892,5 +893,25 @@ def test_cli_prints_enforcement_registered_or_prose_only(tmp_path):
         [sys.executable, str(REPO / "scripts" / "apply.py"), str(dest), "--host", "unknown"],
         capture_output=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr
-    assert "enforcement: prose-only" in r.stdout
+    assert "enforcement: skipped this invocation" in r.stdout
+    assert "prose-only" not in r.stdout
+    assert "disabled" not in r.stdout.lower()
     assert "settings.local.json" not in r.stdout
+
+
+def test_cli_preserves_existing_dsh_registration_and_says_so(tmp_path, dsh_patch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    dsh_patch.parent.mkdir(parents=True, exist_ok=True)
+    dsh_patch.write_text(apply.dsh_entry(), encoding="utf-8")
+    before = dsh_patch.read_bytes()
+    env = os.environ.copy()
+    env["DSH_HOME"] = str(dsh_patch.parent)
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "dsh"],
+        capture_output=True, encoding="utf-8", env=env)
+    assert r.returncode == 0, r.stderr
+    assert dsh_patch.read_bytes() == before
+    assert "skipped this invocation" in r.stdout
+    assert "existing registration preserved" in r.stdout
+    assert "prose-only" not in r.stdout
+    assert "disabled" not in r.stdout.lower()
