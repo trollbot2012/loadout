@@ -104,9 +104,12 @@ def is_edit_tool(tool):
     carry theirs in the middle.
     Ceiling: the verb list is literal. A mutator that spells its verb another way (`send`,
     `trash`, `dispatch`, an `-s`/`-or` inflection) is not classified until its own tool contract
-    is established and its word added -- stemming or suffix rules were rejected because they
-    turn the benign `runner_status` into a denial. Erring the other way is cheap: a read-only
-    tool that happens to say `execute` is only gated until stage 1 runs, never blocked outright."""
+    is established and its word added -- prefix or substring matching, the cheap rule that would
+    have folded `execute` into `exec`, also folds `runner_status` into `run`, which the tests pin
+    as allowed; stemmers in general were not evaluated. Erring the other way is the safer
+    direction but not free: an over-classified read-only tool is denied until stage 1 runs, is
+    denied at every stage if a `path`/`file_path` argument basenames a surface file, and its call
+    marks the session edited, so the Stop gate then requires every stage."""
     if tool in EDIT_TOOLS:
         return True
     name = tool or ""

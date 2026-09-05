@@ -226,8 +226,11 @@ Amendments the code review surfaced; the code is the reference for these:
 - MCP name matching is a literal whole-word verb list, so it still misses mutators that spell
   their verb another way (`set_*`, `put`, `append`, `evaluate_script`, Gmail's `send_message`
   and `trash_message`) until each tool's own contract is established and its word added.
-  Stemming and suffix rules were rejected: they turn the benign `runner_status` into a denial.
-  Over-denial is the cheap direction, since a gated tool is released once stage 1 runs.
+  Prefix or substring matching, the cheap rule that would have folded `execute` into `exec`,
+  also folds `runner_status` into `run`, so the list stays literal; stemmers in general were not
+  evaluated. Over-denial is the safer direction but not free: an over-classified tool is denied
+  until stage 1 runs, denied at every stage if a `path`/`file_path` argument basenames a surface
+  file, and its call marks the session edited, so the Stop gate then requires every stage.
 - An unquoted Windows path with backslashes in a hand-typed bootstrap loses them to shlex and is
   denied; SKILL.md quotes the path, so this is a note only.
 - Helper-only coverage for non-shell writers and failed Skill calls; add one subprocess case each.
