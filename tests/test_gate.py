@@ -36,6 +36,11 @@ def test_mcp_action_tokens_not_substring_run():
     assert gate.is_edit_tool("mcp__fs__write_file")
     assert gate.is_edit_tool("mcp__x__create_issue")
     assert not gate.is_edit_tool("mcp__fs__read_file")
+    # the mutating word sits in the middle of both configured Composio executors, so no
+    # first-/last-word rule can classify them
+    assert gate.is_edit_tool("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL")
+    assert gate.is_edit_tool("mcp__composio__COMPOSIO_REMOTE_BASH_TOOL")
+    assert not gate.is_edit_tool("mcp__composio__COMPOSIO_GET_TOOL_SCHEMAS")
 
 
 def transcript(tmp_path, blocks, name="t.jsonl", cwd=None):

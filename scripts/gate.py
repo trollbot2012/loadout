@@ -41,6 +41,7 @@ _WORD_RE = re.compile(r"[^a-z0-9]+")  # splits an action into words: bash_tool, 
 MCP_MUTATING = frozenset({
     "write", "create", "edit", "delete", "remove", "exec", "run", "bash",
     "workbench", "upload", "update", "apply", "move", "rename", "save", "patch",
+    "execute",  # COMPOSIO_MULTI_EXECUTE_TOOL: `exec` is a different word, so it missed the executor
 })
 SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py",
                  "cordis.patch.yml", "cordis.yml", "gate_dsh.mjs"}  # lower-cased; the cordis files are dsh loader config
@@ -98,7 +99,14 @@ def sensitive(cmd):
 def is_edit_tool(tool):
     """True for native edit tools and MCP tools whose last `__` action names a mutating verb.
     Whole-word match, not substring: `run_workflow` and `COMPOSIO_REMOTE_BASH_TOOL` mutate,
-    `list_workflow_runs` does not."""
+    `list_workflow_runs` does not. Any word of the action counts, not the first or the last:
+    both configured Composio executors (`COMPOSIO_REMOTE_BASH_TOOL`, `COMPOSIO_MULTI_EXECUTE_TOOL`)
+    carry theirs in the middle.
+    Ceiling: the verb list is literal. A mutator that spells its verb another way (`send`,
+    `trash`, `dispatch`, an `-s`/`-or` inflection) is not classified until its own tool contract
+    is established and its word added -- stemming or suffix rules were rejected because they
+    turn the benign `runner_status` into a denial. Erring the other way is cheap: a read-only
+    tool that happens to say `execute` is only gated until stage 1 runs, never blocked outright."""
     if tool in EDIT_TOOLS:
         return True
     name = tool or ""

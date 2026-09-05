@@ -194,9 +194,12 @@ Amendments the code review surfaced; the code is the reference for these:
   checkout, restore, apply), commands behind `sudo`, `env`, `VAR=x` prefixes, a `/path/`
   prefix, a subshell `(` or a quoted `sh -c '…'` string, and the fullwidth `＞` character.
 - The hook matcher is `Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*`.
-  EnterWorktree and any MCP tool whose name contains write, create, edit, delete, remove,
-  exec, run, bash, workbench, upload, update, apply, move, rename, save or patch are treated
-  as edit tools; other MCP tools (reads, queries) are not gated.
+  EnterWorktree and any MCP tool one of whose action words is write, create, edit, delete,
+  remove, exec, execute, run, bash, workbench, upload, update, apply, move, rename, save or
+  patch are treated as edit tools; other MCP tools (reads, queries) are not gated. The match is
+  whole-word over every word of the last `__` segment, so `list_workflow_runs` and
+  `runner_status` stay ungated while `COMPOSIO_REMOTE_BASH_TOOL` and
+  `COMPOSIO_MULTI_EXECUTE_TOOL`, whose verbs sit mid-name, do not.
 - Remaining ceilings, unchanged: an arbitrary script file (`python other.py`) is not
   write-shaped; after stage 1 an agent could in principle append a forged user line to the
   transcript file (needs a host-signed transcript to close); the transcript may lag the last
@@ -220,8 +223,11 @@ Amendments the code review surfaced; the code is the reference for these:
 - Uncovered cheap writer forms: `nohup|time|nice|xargs|command cp`, `git -C . commit`,
   `git --no-pager commit`, `cmd /c copy`, `py -c`, `printf code | python -`, `bun -e`, `php -r`,
   `sed -e x -i f`, `rsync`, `ln -sf`, `vim -c wq`. Heuristic ceiling; add the cheap ones.
-- MCP name matching is substring-based (`run`, `update`) and gates some read-only tools while
-  missing `set_*`, `put`, `append`, `evaluate_script`.
+- MCP name matching is a literal whole-word verb list, so it still misses mutators that spell
+  their verb another way (`set_*`, `put`, `append`, `evaluate_script`, Gmail's `send_message`
+  and `trash_message`) until each tool's own contract is established and its word added.
+  Stemming and suffix rules were rejected: they turn the benign `runner_status` into a denial.
+  Over-denial is the cheap direction, since a gated tool is released once stage 1 runs.
 - An unquoted Windows path with backslashes in a hand-typed bootstrap loses them to shlex and is
   denied; SKILL.md quotes the path, so this is a note only.
 - Helper-only coverage for non-shell writers and failed Skill calls; add one subprocess case each.
