@@ -806,6 +806,64 @@ def test_missing_gate_main_exits_2_after_prose(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / ".claude/settings.local.json").exists()
 
 
+def test_missing_gate_codex_keeps_prose_and_does_not_write_hooks(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "GATE_CODEX", tmp_path / "missing-gate_codex.py")
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert "gate_codex.py" in str(ei.value).lower()
+    assert not (tmp_path / "codex-home" / "hooks.json").exists()
+    assert ei.value.results["AGENTS.md"] == "created"
+
+
+def test_unreadable_codex_trust_config_fails_before_hooks_write(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    cfg = tmp_path / "codex-home" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_bytes(b"\xff\xfe not utf-8")
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert "config.toml" in str(ei.value).lower()
+    assert not (tmp_path / "codex-home" / "hooks.json").exists()
+
+
+def test_missing_dsh_python_adapter_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "GATE_DSH", tmp_path / "missing-gate_dsh.py")
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "deepseek", enforce_dsh=True)
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert "gate_dsh.py" in str(ei.value).lower()
+    assert not dsh_patch.exists()
+
+
+def test_codex_trust_failure_after_hooks_reports_partial_write(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("trust denied")
+
+    monkeypatch.setattr(apply, "trust_codex_gate", boom)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert (tmp_path / "codex-home" / "hooks.json").is_file()
+    assert ei.value.results["~/.codex/hooks.json"].startswith("created")
+    assert "trust denied" in str(ei.value)
+
+
+def test_unusable_dsh_python_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "_dsh_python", lambda: None)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "deepseek", enforce_dsh=True)
+    assert "python" in str(ei.value).lower()
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert not dsh_patch.exists()
+
+
 def test_missing_dsh_plugin_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch, capsys):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     monkeypatch.setattr(apply, "DSH_PLUGIN", tmp_path / "missing.mjs")

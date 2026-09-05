@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -43,6 +44,8 @@ KNOWN_HOSTS = frozenset({
     "copilot", "grok", "vibe", "deepseek", "hermes", "zcode",
 })
 GATE = Path(__file__).resolve().parent / "gate.py"
+GATE_CODEX = Path(__file__).resolve().parent / "gate_codex.py"
+GATE_DSH = Path(__file__).resolve().parent / "gate_dsh.py"
 DSH_PLUGIN = Path(__file__).resolve().parent / "gate_dsh.mjs"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
@@ -473,6 +476,26 @@ def resolve_host(host):
     raise ValueError(f"unknown host {host!r}; known: {choices} (or unknown)")
 
 
+def _require_file(path, results):
+    if not path.is_file():
+        raise EnforcementFailed(f"{path.name} not found ({path})", results)
+
+
+def _dsh_python():
+    """Python the dsh plugin will spawn: LOADOUT_PYTHON if set, else python/python3 on PATH."""
+    env = os.environ.get("LOADOUT_PYTHON")
+    cands = (env,) if env else ("python", "python3")
+    for cand in cands:
+        if not cand:
+            continue
+        if Path(cand).is_file():
+            return cand
+        found = shutil.which(cand)
+        if found:
+            return found
+    return None
+
+
 def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False, enforce_dsh=False):
     project = Path(project)
     host = resolve_host(host)
@@ -502,19 +525,31 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         if other != native and (project / other).is_file():
             results[other] = upsert_native(project / other, blk)
     if gate:
-        if not GATE.is_file():
-            raise EnforcementFailed(f"gate.py not found ({GATE})", results)
+        _require_file(GATE, results)
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     if codex:
-        if not GATE.is_file():
-            raise EnforcementFailed(f"gate.py not found ({GATE})", results)
-        reg = register_codex_gate(CODEX_HOOKS, codex_settings)
-        trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
-        results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
-                                          + " in config.toml (Codex loads hooks at the next session)")
+        _require_file(GATE, results)
+        _require_file(GATE_CODEX, results)
+        try:
+            if CODEX_CONFIG.is_file():
+                CODEX_CONFIG.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise EnforcementFailed(f"config.toml is not readable ({e})", results)
+        try:
+            reg = register_codex_gate(CODEX_HOOKS, codex_settings)
+            results["~/.codex/hooks.json"] = reg
+            trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
+            results["~/.codex/hooks.json"] = (
+                reg + "; trust " + ("granted" if trust == "trusted" else "already present")
+                + " in config.toml (Codex loads hooks at the next session)")
+        except (OSError, ValueError) as e:
+            raise EnforcementFailed(str(e), results)
     if dsh:
-        if not DSH_PLUGIN.is_file():
-            raise EnforcementFailed(f"gate_dsh.mjs not found ({DSH_PLUGIN})", results)
+        _require_file(DSH_PLUGIN, results)
+        _require_file(GATE, results)
+        _require_file(GATE_DSH, results)
+        if not _dsh_python():
+            raise EnforcementFailed("no usable Python for the dsh plugin (set LOADOUT_PYTHON)", results)
         results["~/.dsh/cordis.patch.yml"] = register_dsh_gate() + (
             " (dsh loads the plugin at the next session; there is no per-repo config,"
             " so this registration covers every profile)")
