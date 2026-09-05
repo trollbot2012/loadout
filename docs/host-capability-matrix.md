@@ -80,11 +80,20 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   `config.toml` *before* it writes anything at all — prose files included. A file Codex cannot parse
   must not be appended to: the append reports trust granted while the hook stays untrusted forever.
   Unreadable (non-UTF-8, permission-denied) is caught on every supported interpreter. Malformed
-  (`[broken`) is caught only where `tomllib` exists, i.e. Python 3.11+; on 3.9/3.10 `apply` has no
-  TOML parser and none is hand-rolled or added as a dependency, so there the guarantee is
-  readability only and a malformed config is still appended to. Prose-only use (`--no-enforce`, or
-  `--host codex` without `--enforce-codex`) is unaffected on every supported version. Residual limit:
-  the check validates the file as found, not the file as it will be after our append.
+  (`[broken`) needs a parser, and the stdlib only ships one from 3.11 (`tomllib`). None is
+  hand-rolled and no dependency is added, so where `tomllib` is absent the preflight **fails
+  closed**: on 3.9/3.10 `--enforce-codex` against an *existing* `config.toml` is refused outright —
+  valid-looking as well as malformed — with an actionable message naming the missing parser, exit 2
+  and empty results. An unvalidated config is never appended to. A genuinely absent `config.toml` is
+  still created there, and prose-only use (`--no-enforce`, or `--host codex` without
+  `--enforce-codex`) is unaffected on every supported version, so 3.9/3.10 core use stands.
+  The preflight also distinguishes a genuinely absent config from an existing target that cannot be
+  appended to: a directory, device, dangling symlink or symlink-to-directory at the config path is
+  rejected before any write (`exists()` alone would read a dangling link as absent). A symlink
+  resolving to a regular file stays supported. Residual limits: the check validates the file as
+  found, not the file as it will be after our append; the 3.9/3.10 branch is covered by forcing
+  `tomllib = None` on a 3.11+ interpreter, not by a real 3.9/3.10 run; and the symlink cases are
+  skipped on Windows accounts without symlink-creation privilege, so they are unexercised here.
 - Scope of the `proven` status: headless `codex exec`. The desktop app-server path was never
   exercised by these proofs and is not claimed.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json

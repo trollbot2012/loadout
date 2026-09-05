@@ -312,20 +312,32 @@ def codex_config_problem(path=None):
 
     trust_codex_gate edits config.toml textually, so a file Codex itself cannot parse must never be
     appended to: the append would report trust granted while the hook stays untrusted forever, and
-    the operator would be left holding a file that is now both broken and modified. Unreadable is
-    detectable on every supported interpreter; malformed needs a TOML parser, and the stdlib only
-    ships one from 3.11 (tomllib). On 3.9/3.10 the parse check is skipped rather than hand-rolled --
-    no partial parser, no new dependency -- so only the readability guarantee holds there. The
-    boundary is recorded in docs/host-capability-matrix.md."""
+    the operator would be left holding a file that is now both broken and modified. Validating an
+    existing file therefore needs a TOML parser, and the stdlib only ships one from 3.11 (tomllib).
+    None is hand-rolled and no dependency is added, so on 3.9/3.10 an existing config is rejected
+    outright rather than appended to unvalidated: prose-only use is unaffected there, and a genuinely
+    absent config is still created. Only a regular file (or a symlink resolving to one) can be
+    edited; a directory, device or dangling symlink is an existing target we cannot append to, not an
+    absence. The boundary is recorded in docs/host-capability-matrix.md."""
     path = Path(path if path is not None else CODEX_CONFIG)
-    if not path.is_file():
+    try:
+        # is_file/exists follow symlinks and is_symlink does not, so a dangling link reads as
+        # existing; anything but a regular file is rejected before it is opened or read
+        regular, present = path.is_file(), path.exists() or path.is_symlink()
+    except OSError as e:
+        return f"config.toml cannot be inspected ({e}); fix it or drop --enforce-codex"
+    if not regular:
+        if present:
+            return (f"config.toml is not a regular file ({path}); fix it or drop --enforce-codex")
         return None
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         return f"config.toml is not readable ({e}); fix it or drop --enforce-codex"
     if tomllib is None:
-        return None
+        return ("config.toml cannot be validated: this interpreter has no stdlib TOML parser"
+                " (tomllib, Python 3.11+), and an unvalidated config must not be appended to;"
+                " run apply on 3.11+ or drop --enforce-codex")
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:

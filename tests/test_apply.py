@@ -902,22 +902,161 @@ def test_malformed_codex_trust_config_exits_2_with_an_actionable_message(tmp_pat
     assert "enforcement: skipped" in out and "config.toml" in out and "--enforce-codex" in out
 
 
-def test_codex_config_problem_without_tomllib_still_catches_unreadable_only(tmp_path, monkeypatch):
-    """The 3.9/3.10 boundary: no stdlib TOML parser, so readability is the whole guarantee there."""
+def test_codex_config_problem_without_tomllib_rejects_every_existing_config(tmp_path, monkeypatch):
+    """The 3.9/3.10 boundary: no stdlib TOML parser, so no existing config can be validated there.
+
+    Forced `tomllib = None` on this interpreter, not a real 3.9/3.10 run — see the disclosure in
+    docs/host-capability-matrix.md."""
     monkeypatch.setattr(apply, "tomllib", None)
     unreadable = tmp_path / "bad.toml"
     unreadable.write_bytes(b"\xff\xfe not utf-8")
     assert "not readable" in apply.codex_config_problem(unreadable)
-    malformed = tmp_path / "broken.toml"
-    malformed.write_bytes(b"[broken\n")
-    assert apply.codex_config_problem(malformed) is None  # documented limit, not an oversight
+    for name, raw in (("broken.toml", b"[broken\n"), ("valid.toml", b'[model]\nname = "gpt"\n')):
+        p = tmp_path / name
+        p.write_bytes(raw)
+        assert "no stdlib TOML parser" in apply.codex_config_problem(p)  # valid-looking too
+    assert apply.codex_config_problem(tmp_path / "absent.toml") is None  # nothing to validate
 
 
+@NEEDS_TOMLLIB
 def test_codex_config_problem_passes_a_readable_valid_or_absent_config(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text('[model]\nname = "gpt"\n', encoding="utf-8")
     assert apply.codex_config_problem(cfg) is None
     assert apply.codex_config_problem(tmp_path / "absent.toml") is None
+
+
+def _codex_sentinels(tmp_path):
+    """Pre-existing bytes at the actual patched targets, so a rejection can be proved non-mutating."""
+    (tmp_path / "AGENTS.md").write_bytes(b"# kept prose\n")
+    hooks = tmp_path / "codex-home" / "hooks.json"
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_bytes(b'{"hooks": {}}')
+    return hooks
+
+
+@pytest.mark.parametrize("raw", [b'[model]\nname = "gpt"\n', b"[broken\n"])
+def test_codex_enforcement_without_a_toml_parser_fails_before_any_write(tmp_path, monkeypatch, raw):
+    """Forced no-parser: valid-looking and malformed existing configs are both rejected, unmutated."""
+    cfg = _codex_config(tmp_path, monkeypatch, raw)
+    hooks = _codex_sentinels(tmp_path)
+    monkeypatch.setattr(apply, "tomllib", None)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "tomllib" in str(ei.value) and "--enforce-codex" in str(ei.value)
+    assert ei.value.results == {}
+    assert cfg.read_bytes() == raw
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+
+
+def test_codex_enforcement_without_a_toml_parser_exits_2(tmp_path, monkeypatch, capsys):
+    _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
+    monkeypatch.setattr(apply, "tomllib", None)
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "codex", "--enforce-codex"])
+    with pytest.raises(SystemExit) as ei:
+        apply.main()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "enforcement: skipped" in out and "3.11+" in out
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_prose_only_codex_is_unaffected_without_a_toml_parser(tmp_path, monkeypatch):
+    """The core 3.9/3.10 path must not be denied: no --enforce-codex, no validation, prose written."""
+    _codex_config(tmp_path, monkeypatch, b"[broken\n")
+    monkeypatch.setattr(apply, "tomllib", None)
+    res = apply.apply(tmp_path, "codex")
+    assert res == {"AGENTS.md": "created"}
+    assert not (tmp_path / "codex-home" / "hooks.json").exists()
+
+
+def test_absent_codex_config_still_registers_without_a_toml_parser(tmp_path, monkeypatch, codex_hooks):
+    """Genuine absence has nothing to validate; trust_codex_gate creates a fresh [hooks.state] file.
+
+    The generated file's own TOML validity is not asserted here and remains unverified this slice."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    monkeypatch.setattr(apply, "tomllib", None)
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert CODEX_NOTE in res["~/.codex/hooks.json"]
+    assert codex_hooks.is_file() and (tmp_path / "codex-home" / "config.toml").is_file()
+
+
+def test_directory_codex_trust_config_fails_before_any_write(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    cfg = tmp_path / "codex-home" / "config.toml"
+    cfg.mkdir(parents=True)
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    hooks = _codex_sentinels(tmp_path)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "not a regular file" in str(ei.value)
+    assert ei.value.results == {}
+    assert list(cfg.iterdir()) == []  # the directory is neither read nor written into
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+
+
+@pytest.mark.parametrize("target", ["dangling", "directory"])
+def test_symlinked_codex_trust_config_that_is_not_a_regular_file_fails_before_any_write(
+        tmp_path, monkeypatch, target):
+    """A dangling link is an existing target, not an absence — exists() alone would miss it."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    dest = home / "dest"
+    if target == "directory":
+        dest.mkdir()
+    cfg = home / "config.toml"
+    try:
+        cfg.symlink_to(dest, target_is_directory=(target == "directory"))
+    except (OSError, NotImplementedError) as e:  # Windows needs privilege/developer mode
+        pytest.skip(f"symlinks unavailable on this OS/account: {e}")
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    hooks = _codex_sentinels(tmp_path)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "not a regular file" in str(ei.value)
+    assert ei.value.results == {}
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+
+
+@NEEDS_TOMLLIB
+def test_symlink_to_a_regular_codex_trust_config_stays_supported(tmp_path, monkeypatch):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "real.toml").write_text('[model]\nname = "gpt"\n', encoding="utf-8")
+    cfg = home / "config.toml"
+    try:
+        cfg.symlink_to(home / "real.toml")
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"symlinks unavailable on this OS/account: {e}")
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    assert apply.codex_config_problem(cfg) is None
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert CODEX_NOTE in res["~/.codex/hooks.json"]
+
+
+def test_codex_trust_config_read_error_fails_before_any_write(tmp_path, monkeypatch):
+    """A read that fails with OSError, not just undecodable bytes; mocked, so no real file is chmod-ed."""
+    cfg = _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
+    hooks = _codex_sentinels(tmp_path)
+    real_read_text = Path.read_text
+
+    def boom(self, *a, **kw):
+        if self == cfg:
+            raise PermissionError(13, "permission denied")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "not readable" in str(ei.value)
+    assert ei.value.results == {}
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
 
 
 def test_missing_dsh_python_adapter_keeps_prose_and_does_not_write_patch(tmp_path, dsh_patch, monkeypatch):
