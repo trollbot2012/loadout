@@ -185,6 +185,19 @@ def test_apply_valueless_flags_exit_2_without_traceback(tmp_path):
         assert not (tmp_path / "AGENTS.md").exists(), args
 
 
+def test_apply_unknown_or_repeated_flags_exit_2_without_writes(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    for args in ([str(tmp_path), "--bogus"],
+                 [str(tmp_path), "--host", "unknown", "--host"],
+                 [str(tmp_path), "--host", "unknown", "--host", "claude-code"]):
+        r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), *args],
+                           capture_output=True, encoding="utf-8")
+        assert r.returncode == 2, args
+        assert "Traceback" not in r.stderr
+        assert "Usage:" in r.stderr or "apply:" in r.stderr
+        assert not (tmp_path / "AGENTS.md").exists(), args
+
+
 def test_cli_host_claude_alias_writes_claude_md_and_registers_gate(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude"],

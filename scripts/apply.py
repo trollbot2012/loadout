@@ -52,14 +52,42 @@ VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; 
 BOOL_FLAGS = {"--no-enforce", "--enforce-codex", "--enforce-dsh"}  # switches; gate.py allows exactly these
 
 
-def _cli_value(argv, flag, default=None):
-    """Next token after `flag`, or `default` when absent. A missing token or another flag is an error."""
-    if flag not in argv:
-        return default
-    i = argv.index(flag)
-    if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
-        raise ValueError(f"{flag} needs a value")
-    return argv[i + 1]
+def parse_argv(argv):
+    """Validate every token before apply dispatches. Unknown/missing/repeated value-flags error."""
+    host, loadout = None, None
+    seen_value, seen_bool = set(), set()
+    positionals = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            if a in VALUE_FLAGS:
+                if a in seen_value:
+                    raise ValueError(f"{a} given more than once")
+                seen_value.add(a)
+                if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                    raise ValueError(f"{a} needs a value")
+                if a == "--host":
+                    host = argv[i + 1]
+                else:
+                    loadout = argv[i + 1]
+                i += 2
+                continue
+            if a in BOOL_FLAGS:
+                seen_bool.add(a)
+                i += 1
+                continue
+            raise ValueError(f"unknown option {a}")
+        positionals.append(a)
+        i += 1
+    return {
+        "host": "unknown" if host is None else host,
+        "loadout": "LOADOUT.md" if loadout is None else loadout,
+        "enforce": "--no-enforce" not in seen_bool,
+        "enforce_codex": "--enforce-codex" in seen_bool,
+        "enforce_dsh": "--enforce-dsh" in seen_bool,
+        "args": positionals,
+    }
 
 
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
@@ -502,20 +530,17 @@ def main():
         print(__doc__)
         return
     try:
-        host = _cli_value(argv, "--host", "unknown")
-        loadout = _cli_value(argv, "--loadout", "LOADOUT.md")
+        parsed = parse_argv(argv)
     except ValueError as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
-    enforce = "--no-enforce" not in argv
-    enforce_codex = "--enforce-codex" in argv
-    enforce_dsh = "--enforce-dsh" in argv
-    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
+    args = parsed["args"]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     try:
-        results = apply(args[0], host, loadout, enforce, enforce_codex, enforce_dsh)
+        results = apply(args[0], parsed["host"], parsed["loadout"],
+                        parsed["enforce"], parsed["enforce_codex"], parsed["enforce_dsh"])
     except EnforcementFailed as e:
         for f, action in e.results.items():
             print(f"- {f}: {action}")

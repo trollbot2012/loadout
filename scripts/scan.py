@@ -847,15 +847,43 @@ def main():
     if "--help" in argv:
         print(__doc__)
         return
+    known = {"--json", "--brief", "--check", "--self-install", "--hosts"}
     hosts_arg = None
-    if "--hosts" in argv:
-        i = argv.index("--hosts")
-        hosts_arg = argv[i + 1] if i + 1 < len(argv) else None
-        del argv[i:i + 2]
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            if a not in known:
+                print(f"scan: unknown option {a}", file=sys.stderr)
+                sys.exit(2)
+            if a == "--hosts":
+                if hosts_arg is not None:
+                    print("scan: --hosts given more than once", file=sys.stderr)
+                    sys.exit(2)
+                if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                    print("scan: --hosts needs a value", file=sys.stderr)
+                    sys.exit(2)
+                hosts_arg = argv[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        i += 1
     if "--self-install" in argv or "--check" in argv:
         sys.exit(self_install(hosts_arg, "--check" in argv))
     flags = {a for a in argv if a.startswith("--")}
-    args = [a for a in argv if not a.startswith("--")]
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--hosts":
+            i += 2
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        args.append(a)
+        i += 1
     proj = Path(args[0] if args else os.getcwd()).expanduser()
     if not proj.is_dir():
         print(f"project dir not found: {proj}", file=sys.stderr)

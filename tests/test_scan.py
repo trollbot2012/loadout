@@ -369,6 +369,20 @@ def test_self_install_check_and_host_opt_in(tmp_path):
     assert r.returncode == 2 and "unknown host(s): bogus" in r.stderr
 
 
+def test_scan_unknown_or_valueless_flags_exit_2_without_dispatch(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    r = run_scan(h, ["--self-install", "--hosts"])
+    assert r.returncode == 2, r.stdout
+    assert "Usage:" in r.stderr or "needs a value" in r.stderr or "scan:" in r.stderr
+    assert "Traceback" not in r.stderr
+    assert not (h / ".claude/skills/loadout").exists()
+    r = run_scan(h, ["--bogus", str(proj)])
+    assert r.returncode == 2
+    assert "Usage:" in r.stderr or "unknown" in r.stderr or "scan:" in r.stderr
+    assert "Harness Inventory" not in r.stdout
+    assert "Traceback" not in r.stderr
+
+
 def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
     h, proj = make_fixture(tmp_path)
     def running(value, *args):
