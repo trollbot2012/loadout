@@ -852,7 +852,7 @@ def main():
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a.startswith("--"):
+        if a.startswith("-"):  # any dash token, so -x cannot slip through as the project path
             if a not in known:
                 print(f"scan: unknown option {a}", file=sys.stderr)
                 sys.exit(2)
@@ -864,6 +864,11 @@ def main():
                     print("scan: --hosts needs a value", file=sys.stderr)
                     sys.exit(2)
                 hosts_arg = argv[i + 1]
+                # an empty/blank list would fall through install_targets as "no --hosts given"
+                # and silently install into every present default host
+                if not [w for w in hosts_arg.split(",") if w.strip()]:
+                    print("scan: --hosts needs at least one host name", file=sys.stderr)
+                    sys.exit(2)
                 i += 2
                 continue
             i += 1

@@ -383,6 +383,21 @@ def test_scan_unknown_or_valueless_flags_exit_2_without_dispatch(tmp_path):
     assert "Traceback" not in r.stderr
 
 
+def test_scan_blank_hosts_and_dash_tokens_exit_2_without_installing(tmp_path):
+    """A blank --hosts list, and any stray dash token, used to fall through as "no --hosts given"
+    and self-install into every default host present in the home."""
+    cases = ((["--self-install", "--hosts", ""], "at least one host"),
+             (["--self-install", "--hosts", " , "], "at least one host"),
+             (["--self-install", "-x"], "unknown option"))
+    for n, (args, want) in enumerate(cases):
+        h, _ = make_fixture(tmp_path / str(n))
+        r = run_scan(h, args)
+        assert r.returncode == 2, (args, r.stdout)
+        assert "Traceback" not in r.stderr
+        assert want in r.stderr, (args, r.stderr)
+        assert not list(h.glob("*/skills/loadout/SKILL.md")), args
+
+
 def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
     h, proj = make_fixture(tmp_path)
     def running(value, *args):

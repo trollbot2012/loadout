@@ -66,13 +66,15 @@ def parse_argv(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a.startswith("--"):
+        if a.startswith("-"):  # any dash token, so -x cannot slip through as a positional
             if a in VALUE_FLAGS:
                 if a in seen_value:
                     raise ValueError(f"{a} given more than once")
                 seen_value.add(a)
                 if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
                     raise ValueError(f"{a} needs a value")
+                if not argv[i + 1].strip():
+                    raise ValueError(f"{a} needs a non-empty value")
                 if a == "--host":
                     host = argv[i + 1]
                 else:
@@ -598,6 +600,9 @@ def main():
     args = parsed["args"]
     if not args:
         print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    if len(args) > 1:  # gate.py already requires exactly one positional; don't silently drop the rest
+        print(f"apply: expected one project directory, got {len(args)}", file=sys.stderr)
         sys.exit(2)
     try:
         results = apply(args[0], parsed["host"], parsed["loadout"],

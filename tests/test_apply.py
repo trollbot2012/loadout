@@ -199,6 +199,26 @@ def test_apply_unknown_or_repeated_flags_exit_2_without_writes(tmp_path):
         assert not (tmp_path / "AGENTS.md").exists(), args
 
 
+def test_apply_dash_tokens_blank_values_and_extra_paths_exit_2_without_writes(tmp_path):
+    """Each case wrote AGENTS.md (or errored with an OSError) before argv validation was complete."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    for args, want in (([str(tmp_path), "-x"], "unknown option"),           # a lone dash token was a positional
+                       ([str(tmp_path), "--host", "claude-code", "-y"], "unknown option"),
+                       ([str(tmp_path), "--host", ""], "non-empty"),        # applied with an empty host, rc 0
+                       ([str(tmp_path), "--loadout", "   "], "non-empty"),  # reached open() and raised OSError
+                       ([str(tmp_path), str(other)], "expected one")):      # second path silently dropped
+        r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), *args],
+                           capture_output=True, encoding="utf-8")
+        assert r.returncode == 2, args
+        assert "Traceback" not in r.stderr
+        assert want in r.stderr, (args, r.stderr)
+        assert not (tmp_path / "AGENTS.md").exists(), args
+        assert not (other / "AGENTS.md").exists(), args
+
+
 def test_cli_host_claude_alias_writes_claude_md_and_registers_gate(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude"],
