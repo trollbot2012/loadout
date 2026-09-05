@@ -30,6 +30,14 @@ import sys
 from pathlib import Path
 
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
+# Copied from scan.py (do not import the scanner: apply stays stdlib-only and path-independent).
+# Drift is pinned by tests/test_apply.py::test_host_aliases_match_the_scanner.
+HOST_ALIASES = {"claude": "claude-code", "claude_code": "claude-code", "claudecode": "claude-code",
+                "dsh": "deepseek", "deepseek-harness": "deepseek", "copilot-cli": "copilot"}
+KNOWN_HOSTS = frozenset({
+    "claude-code", "codex", "cursor", "gemini", "opencode", "crush", "qwen", "continue",
+    "copilot", "grok", "vibe", "deepseek", "hermes", "zcode",
+})
 GATE = Path(__file__).resolve().parent / "gate.py"
 DSH_PLUGIN = Path(__file__).resolve().parent / "gate_dsh.mjs"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
@@ -392,8 +400,20 @@ def upsert(path, blk, create_with=None):
     return action
 
 
+def resolve_host(host):
+    """Documented aliases → table key. `unknown` and known generic hosts stay prose-only.
+    An explicit misspelling is an error, not a silent fallback."""
+    key = (host or "unknown").strip().lower() or "unknown"
+    key = HOST_ALIASES.get(key, key)
+    if key in KNOWN_HOSTS or key == "unknown":
+        return key
+    choices = ", ".join(sorted(KNOWN_HOSTS))
+    raise ValueError(f"unknown host {host!r}; known: {choices} (or unknown)")
+
+
 def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False):
     project = Path(project)
+    host = resolve_host(host)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
     accepted = parse_accepted(text)
     if not accepted:

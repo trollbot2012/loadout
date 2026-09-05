@@ -115,6 +115,42 @@ def test_cli(tmp_path):
     assert r.returncode == 2
 
 
+def test_cli_host_claude_alias_writes_claude_md_and_registers_gate(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claude"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    assert "- CLAUDE.md: created with @AGENTS.md import" in r.stdout
+    assert "- .claude/settings.local.json:" in r.stdout
+    assert (tmp_path / "CLAUDE.md").is_file()
+    assert (tmp_path / ".claude/settings.local.json").is_file()
+
+
+def test_cli_unknown_and_generic_hosts_are_prose_only(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    for host in ("unknown", "cursor", "opencode"):
+        dest = tmp_path / host
+        dest.mkdir()
+        (dest / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+        r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(dest), "--host", host],
+                           capture_output=True, encoding="utf-8")
+        assert r.returncode == 0, r.stderr + r.stdout
+        assert "- AGENTS.md: created" in r.stdout
+        assert "settings.local.json" not in r.stdout
+        assert not (dest / "CLAUDE.md").exists()
+
+
+def test_cli_misspelled_host_exits_2_before_writes(tmp_path):
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(tmp_path), "--host", "claud"],
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 2
+    assert "claud" in r.stderr
+    assert "claude-code" in r.stderr
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
 def test_claude_md_with_agents_import_stays_import_only(tmp_path):
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     apply.apply(tmp_path, "claude-code")
@@ -136,6 +172,11 @@ def test_claude_md_with_agents_import_stays_import_only(tmp_path):
 def test_native_file_table_matches_the_scanner():
     # guard against the two copies drifting when a host is added to scan.py only
     assert apply.NATIVE == scan.NATIVE_FILES
+
+
+def test_host_aliases_match_the_scanner():
+    assert apply.HOST_ALIASES == scan.HOST_ALIASES
+    assert apply.KNOWN_HOSTS == frozenset(scan.HOSTS)
 
 
 def test_this_repos_loadout_table_matches_its_accepted_list():
