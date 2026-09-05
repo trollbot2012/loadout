@@ -307,6 +307,23 @@ def _drop_stale_gate_trust(text, hooks_path, wanted):
     return new, new != text
 
 
+def _unusable_config_parent(path):
+    """Why an absent `path` could not be created anyway, or None when it could.
+
+    A missing target is only usable if its nearest existing ancestor is a directory. Windows raises
+    FileNotFoundError for a path under a regular file exactly as it does for a genuine absence, so
+    the exception alone proves nothing -- only the ancestor's own shape does."""
+    for parent in path.parents:
+        try:
+            os.lstat(parent)  # lstat, not exists(): a dangling link is present but still unusable
+        except FileNotFoundError:
+            continue  # a genuinely absent ancestor is created along with the config
+        except OSError as e:
+            return f"its parent cannot be inspected ({parent}: {e})"
+        return None if os.path.isdir(parent) else f"its parent is not a directory ({parent})"
+    return None  # walked to the root without finding anything: nothing left to contradict absence
+
+
 def codex_config_problem(path=None):
     """Why the existing Codex trust config cannot be safely edited, or None when it can.
 
@@ -318,18 +335,21 @@ def codex_config_problem(path=None):
     outright rather than appended to unvalidated: prose-only use is unaffected there, and a genuinely
     absent config is still created. Only a regular file (or a symlink resolving to one) can be
     edited; a directory, device or dangling symlink is an existing target we cannot append to, not an
-    absence. The boundary is recorded in docs/host-capability-matrix.md."""
+    absence. Absence itself is not taken on trust either: the path must be one we could actually
+    create. The boundary is recorded in docs/host-capability-matrix.md."""
     path = Path(path if path is not None else CODEX_CONFIG)
+    # lstat first, because the pathlib predicates swallow OSError into False: under them a denied
+    # stat and a path that can never exist are both indistinguishable from a genuine absence
     try:
-        # is_file/exists follow symlinks and is_symlink does not, so a dangling link reads as
-        # existing; anything but a regular file is rejected before it is opened or read
-        regular, present = path.is_file(), path.exists() or path.is_symlink()
+        os.lstat(path)  # succeeds for a dangling link too: present, and not something we can edit
     except OSError as e:
-        return f"config.toml cannot be inspected ({e}); fix it or drop --enforce-codex"
-    if not regular:
-        if present:
-            return (f"config.toml is not a regular file ({path}); fix it or drop --enforce-codex")
-        return None
+        problem = _unusable_config_parent(path)
+        if problem is None and isinstance(e, FileNotFoundError):
+            return None  # genuinely absent below a real directory: trust_codex_gate creates it
+        return (f"config.toml is unusable ({path}): {problem or f'it cannot be inspected ({e})'};"
+                " fix it or drop --enforce-codex")
+    if not path.is_file():  # follows symlinks, so a link resolving to a regular file stays supported
+        return f"config.toml is not a regular file ({path}); fix it or drop --enforce-codex"
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:

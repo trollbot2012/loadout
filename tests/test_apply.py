@@ -1039,6 +1039,95 @@ def test_symlink_to_a_regular_codex_trust_config_stays_supported(tmp_path, monke
     assert CODEX_NOTE in res["~/.codex/hooks.json"]
 
 
+def _deny_inspection(monkeypatch, target):
+    """Make every stat of `target` fail with EACCES, deterministically and on any OS/account.
+
+    Both calls are patched because the predicates reach the filesystem by different routes
+    (is_file/exists -> os.stat, is_symlink -> os.lstat) and each swallows OSError into False."""
+    real_stat, real_lstat = os.stat, os.lstat
+
+    def denied(real):
+        def probe(p, *a, **kw):
+            if str(p) == str(target):
+                raise PermissionError(13, "permission denied")
+            return real(p, *a, **kw)
+        return probe
+
+    monkeypatch.setattr(os, "stat", denied(real_stat))
+    monkeypatch.setattr(os, "lstat", denied(real_lstat))
+
+
+def _file_parent_config(tmp_path, monkeypatch):
+    """A config.toml path whose parent is a regular file: nothing can ever be created there.
+
+    Windows raises FileNotFoundError for this exactly as it does for a genuine absence, so the
+    error is not evidence of a creatable path -- only the parent's own shape is."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    parent = tmp_path / "not-a-dir"
+    parent.write_bytes(b"# a regular file, not a directory\n")
+    cfg = parent / "config.toml"
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    return cfg
+
+
+def test_codex_trust_config_under_a_file_parent_fails_before_any_write(tmp_path, monkeypatch):
+    """An impossible destination is not a usable absence: refuse before AGENTS.md or hooks.json."""
+    cfg = _file_parent_config(tmp_path, monkeypatch)
+    hooks = _codex_sentinels(tmp_path)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "config.toml" in str(ei.value) and "--enforce-codex" in str(ei.value)
+    assert ei.value.results == {}
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+    assert cfg.parent.read_bytes() == b"# a regular file, not a directory\n"
+
+
+def test_codex_trust_config_under_a_file_parent_exits_2(tmp_path, monkeypatch, capsys):
+    _file_parent_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["apply.py", str(tmp_path), "--host", "codex", "--enforce-codex"])
+    with pytest.raises(SystemExit) as ei:
+        apply.main()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "enforcement: skipped" in out and "config.toml" in out and "--enforce-codex" in out
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_codex_trust_config_that_cannot_be_inspected_fails_before_any_write(tmp_path, monkeypatch):
+    """A denied stat must not be read as absence: all-false predicates are not evidence of one."""
+    cfg = _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
+    hooks = _codex_sentinels(tmp_path)
+    _deny_inspection(monkeypatch, cfg)
+    with pytest.raises(apply.EnforcementFailed) as ei:
+        apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert "cannot be inspected" in str(ei.value) and "--enforce-codex" in str(ei.value)
+    assert ei.value.results == {}
+    assert cfg.read_bytes() == b'[model]\nname = "gpt"\n'
+    assert (tmp_path / "AGENTS.md").read_bytes() == b"# kept prose\n"
+    assert hooks.read_bytes() == b'{"hooks": {}}'
+
+
+def test_codex_config_problem_separates_a_file_parent_from_a_genuine_absence(tmp_path):
+    """The unit boundary: same FileNotFoundError on Windows, opposite verdicts."""
+    parent = tmp_path / "not-a-dir"
+    parent.write_bytes(b"x")
+    assert "not a directory" in apply.codex_config_problem(parent / "config.toml")
+    assert apply.codex_config_problem(tmp_path / "deep" / "nested" / "config.toml") is None
+
+
+@NEEDS_TOMLLIB
+def test_absent_codex_trust_config_under_absent_parents_is_still_created(tmp_path, monkeypatch):
+    """Positive control: a genuinely missing config below missing directories is created, not refused."""
+    (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+    cfg = tmp_path / "deep" / "nested" / "codex-home" / "config.toml"
+    monkeypatch.setattr(apply, "CODEX_CONFIG", cfg)
+    assert apply.codex_config_problem(cfg) is None
+    res = apply.apply(tmp_path, "codex", enforce_codex=True)
+    assert CODEX_NOTE in res["~/.codex/hooks.json"]
+    assert "[hooks.state" in cfg.read_text(encoding="utf-8")
+
+
 def test_codex_trust_config_read_error_fails_before_any_write(tmp_path, monkeypatch):
     """A read that fails with OSError, not just undecodable bytes; mocked, so no real file is chmod-ed."""
     cfg = _codex_config(tmp_path, monkeypatch, b'[model]\nname = "gpt"\n')
