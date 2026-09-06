@@ -471,18 +471,22 @@ MINIMAL_NOTES = """# Skill notes
 
 def test_documented_installed_names_recipe_feeds_check_notes(tmp_path):
     """SKILL.md tells the reader to build check_notes' `--installed` list from the scanner rather
-    than by hand. The three documented commands run here against the synthetic home, so the
-    instructions stay runnable; no real home and no installed copy is read or written."""
+    than by hand. This runs an equivalent subprocess pipeline against the synthetic home, so the
+    instructions' logic stays runnable: the one-liner is pinned verbatim, but the interpreter is
+    `sys.executable` rather than a `python3` on PATH, both documented `>` redirects are captured
+    stdout written here, and command 3 is given an explicit notes path. Literal shell redirection,
+    PATH `python3` and check_notes' default notes lookup are therefore not exercised. No real home
+    and no installed copy is read or written."""
     assert NAMES_ONE_LINER in (REPO / "SKILL.md").read_text(encoding="utf-8"), \
         "SKILL.md's recipe and this test have drifted apart"
     h, proj = make_fixture(tmp_path)
 
-    r = run_scan(h, ["--json", str(proj)])          # documented command 1
+    r = run_scan(h, ["--json", str(proj)])          # documented command 1, stdout captured here
     assert r.returncode == 0, r.stderr
     inv = tmp_path / "inv.json"
     inv.write_text(r.stdout, encoding="utf-8")
 
-    r = subprocess.run([sys.executable, "-c", NAMES_ONE_LINER, str(inv)],   # documented command 2
+    r = subprocess.run([sys.executable, "-c", NAMES_ONE_LINER, str(inv)],   # command 2, this interpreter
                        capture_output=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr
     installed = tmp_path / "installed.txt"
@@ -491,7 +495,7 @@ def test_documented_installed_names_recipe_feeds_check_notes(tmp_path):
     assert "plainskill" in names and "dshskill" in names, names
     assert "askill" not in names, "plugin-provided skills are a separate section, as documented"
 
-    def check(rows):                                # documented command 3
+    def check(rows):                                # command 3, with an explicit notes path
         notes = tmp_path / "skill-notes.md"
         notes.write_text(MINIMAL_NOTES.format(rows="\n".join(
             f"| {n} | other | Does a thing | - | broad | - |" for n in rows)), encoding="utf-8")

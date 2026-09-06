@@ -306,7 +306,12 @@ python3 "<this-skill-dir>/scripts/check_notes.py" --installed installed.txt
 That is every skills-directory name across the hosts on this machine, including discovered roots.
 Plugin-provided skills are a separate section of the inventory and are deliberately not in the
 list, matching what the scanner says about them. `tests/test_scan.py::test_documented_installed_names_recipe_feeds_check_notes`
-runs these exact commands against a synthetic home, so the recipe stays runnable.
+runs an equivalent subprocess pipeline against a synthetic home, so the recipe stays runnable.
+The one-liner above is pinned verbatim, but the test resolves the interpreter through
+`sys.executable` rather than a `python3` on PATH, writes `inv.json` and `installed.txt` from
+captured stdout rather than through the shell `>` redirects, and passes `check_notes.py` an
+explicit synthetic notes path rather than exercising its default notes lookup. Those three
+things are documented here, not tested.
 
 ## Notes for specific hosts
 
