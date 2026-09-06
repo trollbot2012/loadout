@@ -849,6 +849,7 @@ def main():
         return
     known = {"--json", "--brief", "--check", "--self-install", "--hosts"}
     hosts_arg = None
+    args = []
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -873,22 +874,23 @@ def main():
                 continue
             i += 1
             continue
-        i += 1
-    if "--self-install" in argv or "--check" in argv:
-        sys.exit(self_install(hosts_arg, "--check" in argv))
-    flags = {a for a in argv if a.startswith("--")}
-    args = []
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--hosts":
-            i += 2
-            continue
-        if a.startswith("--"):
-            i += 1
-            continue
         args.append(a)
         i += 1
+    # Both checks run before either dispatch. Documented usage is one optional [project_dir] for a
+    # scan and none at all for the two install modes, and neither mode has anywhere to put a second
+    # path: taking args[0] and dropping the rest reads a mistyped command as a narrower one that
+    # was never asked for.
+    mode = "--check" if "--check" in argv else "--self-install" if "--self-install" in argv else None
+    if mode and args:
+        print(f"scan: {mode} takes no project directory (got {args[0]}); "
+              f"it works on installed copies -- choose hosts with --hosts a,b|all", file=sys.stderr)
+        sys.exit(2)
+    if len(args) > 1:  # apply.py already rejects its extras; don't silently drop these
+        print(f"scan: expected one project directory, got {len(args)}", file=sys.stderr)
+        sys.exit(2)
+    if mode:
+        sys.exit(self_install(hosts_arg, mode == "--check"))
+    flags = {a for a in argv if a.startswith("--")}
     proj = Path(args[0] if args else os.getcwd()).expanduser()
     if not proj.is_dir():
         print(f"project dir not found: {proj}", file=sys.stderr)

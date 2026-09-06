@@ -398,6 +398,37 @@ def test_scan_blank_hosts_and_dash_tokens_exit_2_without_installing(tmp_path):
         assert not list(h.glob("*/skills/loadout/SKILL.md")), args
 
 
+def test_scan_rejects_extra_positionals_and_install_mode_paths(tmp_path):
+    """Documented usage is one optional [project_dir] for a scan and none for --check/--self-install.
+    Taking args[0] and dropping the rest read `--self-install <dir>` as a whole-home install of a
+    skill the caller thought they were scoping, and read a mistyped second path as a narrower scan."""
+    h, proj = make_fixture(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    cases = ((["--self-install", str(proj)], "takes no project directory"),
+             (["--check", str(proj)], "takes no project directory"),
+             (["--self-install", "--hosts", "codex", str(proj)], "takes no project directory"),
+             ([str(proj), str(other)], "expected one project directory, got 2"),
+             (["--json", str(proj), str(other)], "expected one project directory, got 2"))
+    for args, want in cases:
+        r = run_scan(h, args)
+        assert r.returncode == 2, (args, r.stdout)
+        assert want in r.stderr, (args, r.stderr)
+        assert "Traceback" not in r.stderr, args
+        assert "Harness Inventory" not in r.stdout, args  # the scan did not run either
+        assert not list(h.glob("*/skills/loadout/SKILL.md")), args
+
+    # the documented forms still work, in the home those rejections left untouched
+    r = run_scan(h, ["--brief", str(proj)])
+    assert r.returncode == 0 and "Harness Inventory" in r.stdout, r.stderr
+    spaced = tmp_path / "a project"  # the one positional is a literal path, not a token to re-split
+    spaced.mkdir()
+    assert run_scan(h, ["--json", str(spaced)]).returncode == 0
+    r = run_scan(h, ["--self-install", "--hosts", "codex"])
+    assert r.returncode == 0 and "codex: " in r.stdout, r.stderr
+    assert (h / ".codex/skills/loadout/SKILL.md").is_file()
+
+
 def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
     h, proj = make_fixture(tmp_path)
     def running(value, *args):
