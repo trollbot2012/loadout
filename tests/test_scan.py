@@ -236,6 +236,31 @@ def test_shared_pool_credited_to_readers_not_claude(tmp_path):
     assert "shared ~/.agents pool of 2 credited to" in run_scan(h, [str(proj)]).stdout
 
 
+def test_only_here_is_this_host_minus_every_other(tmp_path):
+    """`missing_here` is covered above; this pins the other direction of the same subtraction.
+    `only_here` is the running host's skills minus the union of the others, so it moves when
+    either side moves and it is not a property of the name."""
+    h, proj = make_fixture(tmp_path)
+    write(h / ".claude/skills/claudeonly/SKILL.md", "---\ndescription: only claude has this\n---\n")
+    ch = scan_json(h, proj)["cross_host"]
+    assert "claudeonly" in ch["only_here"]
+    assert "plainskill" not in ch["only_here"], "a name every host carries is universal, not only here"
+    assert set(ch["only_here"]) == {"bigmeta", "bundlekit:pipeline", "bundlekit:verify",
+                                    "claudeonly", "foldedskill", "longskill", "multiline",
+                                    "offskill", "unicodeskill"}
+
+    # one copy in one other host takes it out, in the JSON and in the rendered line
+    write(h / ".zcode/skills/claudeonly/SKILL.md", "---\ndescription: now shared\n---\n")
+    ch = scan_json(h, proj)["cross_host"]
+    assert "claudeonly" not in ch["only_here"]
+    line = run_scan(h, [str(proj)]).stdout.split("- only in this host (")[1].split("\n")[0]
+    assert line.startswith("8):") and "claudeonly" not in line
+
+    # and it is the running host's own set, not claude's: from deepseek only its own skill qualifies
+    ds = json.loads(run_scan(h, ["--json", str(proj)], host="dsh").stdout)["cross_host"]
+    assert ds["only_here"] == ["dshskill"]
+
+
 def test_discovered_roots_and_brief(tmp_path):
     h, proj = make_fixture(tmp_path)
     inv = scan_json(h, proj)
@@ -427,6 +452,57 @@ def test_scan_rejects_extra_positionals_and_install_mode_paths(tmp_path):
     r = run_scan(h, ["--self-install", "--hosts", "codex"])
     assert r.returncode == 0 and "codex: " in r.stdout, r.stderr
     assert (h / ".codex/skills/loadout/SKILL.md").is_file()
+
+
+# The exact one-liner SKILL.md tells the reader to run; the test below pins the two together.
+NAMES_ONE_LINER = ("import json,sys;i=json.load(open(sys.argv[1]));"
+                   "print(*sorted({s['name'] for h in i['hosts'].values() "
+                   "for s in h['assets'].get('skills',[])}),sep=chr(10))")
+
+MINIMAL_NOTES = """# Skill notes
+
+## Skills
+
+| skill | category | does | overlap | tier | upstream |
+|---|---|---|---|---|---|
+{rows}
+"""
+
+
+def test_documented_installed_names_recipe_feeds_check_notes(tmp_path):
+    """SKILL.md tells the reader to build check_notes' `--installed` list from the scanner rather
+    than by hand. The three documented commands run here against the synthetic home, so the
+    instructions stay runnable; no real home and no installed copy is read or written."""
+    assert NAMES_ONE_LINER in (REPO / "SKILL.md").read_text(encoding="utf-8"), \
+        "SKILL.md's recipe and this test have drifted apart"
+    h, proj = make_fixture(tmp_path)
+
+    r = run_scan(h, ["--json", str(proj)])          # documented command 1
+    assert r.returncode == 0, r.stderr
+    inv = tmp_path / "inv.json"
+    inv.write_text(r.stdout, encoding="utf-8")
+
+    r = subprocess.run([sys.executable, "-c", NAMES_ONE_LINER, str(inv)],   # documented command 2
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    installed = tmp_path / "installed.txt"
+    installed.write_text(r.stdout, encoding="utf-8")
+    names = [n for n in r.stdout.splitlines() if n.strip()]
+    assert "plainskill" in names and "dshskill" in names, names
+    assert "askill" not in names, "plugin-provided skills are a separate section, as documented"
+
+    def check(rows):                                # documented command 3
+        notes = tmp_path / "skill-notes.md"
+        notes.write_text(MINIMAL_NOTES.format(rows="\n".join(
+            f"| {n} | other | Does a thing | - | broad | - |" for n in rows)), encoding="utf-8")
+        return subprocess.run([sys.executable, str(REPO / "scripts" / "check_notes.py"),
+                               str(notes), "--installed", str(installed)],
+                              capture_output=True, encoding="utf-8")
+
+    r = check(names)
+    assert r.returncode == 0, r.stdout
+    r = check([n for n in names if n != "dshskill"])
+    assert r.returncode == 1 and "dshskill: installed but has no row" in r.stdout, r.stdout
 
 
 def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):

@@ -20,6 +20,13 @@ LOADOUT = "# Loadout: x\n\n## Accepted\n- planning: `planner`\n- review: `review
 
 
 def project(tmp_path):
+    # Same ground check as tests/test_gate.py::assert_no_inherited_policy, and for the same
+    # reason: this module's vanished-loadout case asserts that no policy governs, which a
+    # LOADOUT.md above the basetemp would quietly contradict.
+    inherited = gate.find_loadout(tmp_path)
+    assert inherited is None, (
+        f"fixture root {tmp_path} inherits {inherited}; run pytest with --basetemp outside any "
+        "tree carrying a LOADOUT.md. The walk-up is production behaviour, not the bug.")
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))

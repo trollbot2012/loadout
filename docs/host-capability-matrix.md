@@ -30,6 +30,36 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 | Continue CLI | hard (undocumented) | undocumented | `~/.continue/sessions/*.json` | not started |
 | DeepSeek Harness | hard (`tools/pre-execute` returns `{kind:'deny',reason}`) | hard, but the PLUGIN enforces it (`agent.steer()`); every adapter failure path is fail-closed, proven by induced-error tests | native `skill` tool result marker + the plugin's live event stream | **proven** 2026-09-03 (gate_dsh, v1.6.0) — model scripted, see below |
 
+## What this repo implements, and what is tested here
+
+The table above is about what a host *can* do; this one is about what is built and exercised in
+this repository, which is a smaller set. They are independent: a `proven` row with no adapter is a
+research result, not a feature.
+
+| State | Meaning |
+|---|---|
+| implemented | `apply.py` registers the gate in that host's own config file |
+| source-only | mechanism read from that host's docs or source; nothing here registers it |
+| tested here | a test in `tests/` drives that adapter or dialect against a fixture |
+| unavailable | a test exists but skips on this machine or OS, so its result is not evidence here |
+| unsupported | no mechanism, or one this repo has decided not to use |
+
+| Host | Registration | Automated coverage here | Live proof |
+|---|---|---|---|
+| Claude Code | implemented, default (`apply.py:651`; `.claude/settings.local.json`) | tested here — `tests/test_gate.py` drives `gate.py` as a subprocess in both modes | proven 2026-09-02 |
+| Codex CLI | implemented, opt-in `--enforce-codex` (`apply.py:655`; `~/.codex/hooks.json`) | tested here — `tests/test_gate_codex.py` against rollout fixtures | proven 2026-09-02, headless `codex exec` |
+| DeepSeek Harness | implemented, opt-in `--enforce-dsh` (`apply.py:656`; `~/.dsh/cordis.patch.yml`) | tested here — `tests/test_gate_dsh.py` against payload-carried events; the node-dependent registration cases are **unavailable** on a machine with no node on PATH (`tests/test_apply.py:802`) | proven 2026-09-03, model scripted |
+| The other 11 `KNOWN_HOSTS` keys — cursor, gemini, opencode, crush, qwen, continue, copilot, grok, vibe, hermes, zcode | not implemented: `--host` is accepted and writes prose only, and no gate registration branch exists for them (`apply.py:628-637`, `651-656`) | no adapter to cover; the alias/normalisation path is tested | source-only, per the row above |
+| Any other name | unsupported: `resolve_host` raises rather than guessing (`apply.py:557-565`) | n/a | n/a |
+
+A name in `scan.py`'s `HOSTS` table, or a root the scanner discovers, is a scan and self-install
+target only. It means the machine has that directory — not that the gate can be registered there,
+and never that anything was proven. No host support is inferred from a name anywhere in this repo.
+
+Skips are `unavailable`, not passes: the symlink cases in `tests/test_apply.py` and
+`tests/test_scan.py` skip without Windows developer mode, and `tests/test_check_notes.py` skips its
+live-table case when no machine-local `references/skill-notes.md` has been generated.
+
 ## Per-host detail
 
 ### Claude Code (proven)

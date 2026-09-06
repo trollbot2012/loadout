@@ -295,6 +295,19 @@ per line) to check the table against a machine as well: it reports every group w
 skill is not installed there and names the installed member to use instead. The table itself is
 machine-local and gitignored, since it is generated from one machine's skill bodies.
 
+The names come from the scanner, so none of them is typed by hand:
+
+```bash
+python3 "<this-skill-dir>/scripts/scan.py" --json . > inv.json
+python3 -c "import json,sys;i=json.load(open(sys.argv[1]));print(*sorted({s['name'] for h in i['hosts'].values() for s in h['assets'].get('skills',[])}),sep=chr(10))" inv.json > installed.txt
+python3 "<this-skill-dir>/scripts/check_notes.py" --installed installed.txt
+```
+
+That is every skills-directory name across the hosts on this machine, including discovered roots.
+Plugin-provided skills are a separate section of the inventory and are deliberately not in the
+list, matching what the scanner says about them. `tests/test_scan.py::test_documented_installed_names_recipe_feeds_check_notes`
+runs these exact commands against a synthetic home, so the recipe stays runnable.
+
 ## Notes for specific hosts
 
 - **Claude Code**: the harness also exposes plugins/MCP in-session; the scanner's

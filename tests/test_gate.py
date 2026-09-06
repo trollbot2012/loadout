@@ -102,7 +102,23 @@ LOADOUT = ("# Loadout: x\nHarness: claude-code | Project type: cli\nDate: 2026-0
            "- situational, gated work: `unlazy`\n")
 
 
+def assert_no_inherited_policy(root):
+    """Fail loudly if a LOADOUT.md above the fixture would govern it.
+
+    `find_loadout` walks to the filesystem root by design, and that is production behaviour worth
+    keeping: a project's policy usually sits above the file being edited. The cost is that a
+    policy anywhere above the basetemp -- this repo's own LOADOUT.md, if someone points
+    `--basetemp` inside the tree -- silently governs every fixture built here, turning a "no
+    policy, so allow" case into a deny for a reason nothing in the test names. The fixture
+    asserts its own ground instead of narrowing the walk-up."""
+    inherited = gate.find_loadout(root)
+    assert inherited is None, (
+        f"fixture root {root} inherits {inherited}; run pytest with --basetemp outside any tree "
+        "carrying a LOADOUT.md. The walk-up is production behaviour, not the bug.")
+
+
 def project(tmp_path, loadout=LOADOUT):
+    assert_no_inherited_policy(tmp_path)  # before writing this fixture's own policy
     proj = tmp_path / "proj" / "sub"
     proj.mkdir(parents=True)
     if loadout is not None:
@@ -140,6 +156,52 @@ def test_find_loadout_walks_up(tmp_path):
     proj = project(tmp_path)
     assert gate.find_loadout(proj) == tmp_path / "proj" / "LOADOUT.md"
     assert gate.find_loadout(tmp_path) is None
+
+
+def test_fixture_isolation_guard_is_not_vacuous(tmp_path):
+    """The guard every fixture runs has to be able to fail, and the walk-up it guards against has
+    to still work: same mechanism, one accidental and one deliberate."""
+    root = tmp_path / "clean"
+    root.mkdir()
+    assert_no_inherited_policy(root)                    # ordinary fixture ground: nothing above it
+    assert gate.find_loadout(root) is None
+
+    outer = tmp_path / "inherited"
+    inner = outer / "proj"
+    inner.mkdir(parents=True)
+    (outer / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
+    import pytest
+    with pytest.raises(AssertionError, match="inherits"):
+        assert_no_inherited_policy(inner)               # the same planted file the guard exists for
+    assert gate.find_loadout(inner) == outer / "LOADOUT.md", "production walk-up is unchanged"
+
+
+def test_nearest_policy_governs_and_the_walk_up_skips_directories_without_one(tmp_path):
+    """Two policies on one path: the nearest governs, and its stage 1 -- not the outer one's -- is
+    what the hook demands. Remove it and the outer policy governs from the same directory, so the
+    walk-up is still crossing the intermediate directory that has no LOADOUT.md of its own."""
+    assert_no_inherited_policy(tmp_path)
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    deep = inner / "a" / "b"                            # no LOADOUT.md of their own
+    deep.mkdir(parents=True)
+    (outer / "LOADOUT.md").write_bytes(
+        b"# Loadout: outer\n\n## Accepted\n- planning: `outerplanner`\n")
+    (inner / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
+    t = transcript(tmp_path, [])
+
+    reason = run_gate("pre", pre_hook(deep, t))["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`planner`" in reason and "outerplanner" not in reason
+    assert gate.find_loadout(deep) == inner / "LOADOUT.md"
+
+    (inner / "LOADOUT.md").unlink()
+    reason = run_gate("pre", pre_hook(deep, t))["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`outerplanner`" in reason
+    assert gate.find_loadout(deep) == outer / "LOADOUT.md"
+
+    # and the stage that governs is the one the governing file names: invoking it releases the edit
+    after = transcript(tmp_path, [[skill("outerplanner")]], name="after.jsonl")
+    assert run_gate("pre", pre_hook(deep, after)) is None
 
 
 def test_pre_denies_edit_before_stage_one_and_allows_after(tmp_path):
