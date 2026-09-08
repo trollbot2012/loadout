@@ -62,6 +62,23 @@ DSH_PLUGIN = Path(__file__).resolve().parent / "gate_dsh.mjs"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
 CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
+CODEX_HOOKS_KEY = "~/.codex/hooks.json"
+# Printed only when the Codex gate actually registered. Opting in buys a known unresolved
+# limitation, and the operator should hear it at opt-in time rather than from the first denial:
+# the gate's own recovery path is the hatch. docs/host-capability-matrix.md carries the detail.
+# Not printed on the EnforcementFailed path: this invocation's registration did not complete, so
+# there is no newly trusted entry for the limitation to bite on. That is a statement about the
+# attempted write only. It is not a claim about what Codex has loaded: no removal is performed
+# here, so an existing, unchanged, already-trusted hook is left exactly as it was, and this code
+# does not observe whether the host has it loaded either way. For that case the
+# "enforcement: skipped ... existing registration preserved" line is the whole story.
+CODEX_RECOVERY_NOTE = (
+    "note: on Codex a session that has already edited cannot clear a pending stage from inside "
+    "itself — the recorded way to load a skill is a shell read and the enforced pending-stage path "
+    "admits no such read; the one Bash command it lets through first is the validated apply.py "
+    "bootstrap, which cannot load a skill. Whether this host also has a non-shell read primitive "
+    "is unknown here, and ungated tools and a prose-only project never reach that path — so "
+    "recovery is the operator hatch: LOADOUT_ENFORCE=0 (docs/host-capability-matrix.md)")
 DSH_PATCH = Path(os.environ.get("DSH_HOME") or "~/.dsh").expanduser() / "cordis.patch.yml"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
 BOOL_FLAGS = {"--no-enforce", "--enforce-codex", "--enforce-dsh"}  # switches; gate.py allows exactly these
@@ -631,7 +648,7 @@ def existing_registration(project, host):
                 return SETTINGS_LOCAL
         elif host == "codex":
             if CODEX_HOOKS.is_file() and "gate.py" in CODEX_HOOKS.read_text(encoding="utf-8", errors="replace"):
-                return "~/.codex/hooks.json"
+                return CODEX_HOOKS_KEY
         elif host == "deepseek":
             if DSH_PATCH.is_file() and "gate_dsh.mjs" in DSH_PATCH.read_text(encoding="utf-8", errors="replace"):
                 return "~/.dsh/cordis.patch.yml"
@@ -682,9 +699,9 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         _require_file(GATE_CODEX, results)
         try:
             reg = register_codex_gate(CODEX_HOOKS, codex_settings)
-            results["~/.codex/hooks.json"] = reg
+            results[CODEX_HOOKS_KEY] = reg
             trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
-            results["~/.codex/hooks.json"] = (
+            results[CODEX_HOOKS_KEY] = (
                 reg + "; trust " + ("granted" if trust == "trusted" else "already present")
                 + " in config.toml (Codex loads hooks at the next session)")
         except (OSError, ValueError) as e:
@@ -748,7 +765,9 @@ def main():
         sys.exit(2)
     for f, action in results.items():
         print(f"- {f}: {action}")
-    if any(k in results for k in (SETTINGS_LOCAL, "~/.codex/hooks.json", "~/.dsh/cordis.patch.yml")):
+    if CODEX_HOOKS_KEY in results:
+        print(CODEX_RECOVERY_NOTE)
+    if any(k in results for k in (SETTINGS_LOCAL, CODEX_HOOKS_KEY, "~/.dsh/cordis.patch.yml")):
         print("enforcement: registered — takes effect next session")
     else:
         line = "enforcement: skipped this invocation"

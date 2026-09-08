@@ -5,10 +5,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "scripts" / "gate.py"
 sys.path.insert(0, str(REPO / "scripts"))
 import gate  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_hatch(monkeypatch):
+    """A test that calls gate.decide() in-process reads this process's environment, so an operator
+    hatch set in the shell that launched pytest would silently turn enforcement off underneath it
+    and the test would assert against a bypassed gate. run_gate() already strips it for the
+    subprocess path; this covers the direct one. The hatch itself is still proved explicitly, by
+    passing LOADOUT_ENFORCE=0 to a subprocess in test_silent_allow_without_loadout_or_with_hatch."""
+    monkeypatch.delenv("LOADOUT_ENFORCE", raising=False)
 
 
 def test_write_shaped_bash_commands():

@@ -702,7 +702,11 @@ def test_dsh_rerun_is_unchanged_and_byte_identical(dsh_patch):
     assert dsh_patch.read_bytes() == first
 
 
-def test_dsh_host_writes_agents_md_and_registers(tmp_path, dsh_patch):
+def test_dsh_host_writes_agents_md_and_registers(tmp_path, monkeypatch, dsh_patch):
+    # Subject is registration, not interpreter discovery: pin the interpreter already running this
+    # test so a PATH without `python`/`python3` fails this on its own subject or not at all. The
+    # dedicated resolver negatives below cover discovery and stay unpinned.
+    monkeypatch.setenv("LOADOUT_PYTHON", sys.executable)
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     res = apply.apply(tmp_path, "deepseek", enforce_dsh=True)
     assert set(res) == {"AGENTS.md", "~/.dsh/cordis.patch.yml"}
@@ -723,10 +727,13 @@ def test_dsh_no_enforce_and_other_hosts_skip_registration(tmp_path, dsh_patch, c
     assert not dsh_patch.exists()
 
 
-def test_dsh_gate_is_opt_in(tmp_path, dsh_patch):
+def test_dsh_gate_is_opt_in(tmp_path, monkeypatch, dsh_patch):
     """New DSH registration is machine-wide (no per-repo plugin config). Default apply
     must neither create nor rewrite cordis.patch.yml; --enforce-dsh opts in. Foreign
     entries survive; --no-enforce still wins."""
+    # Registration subject, not discovery -- see test_dsh_host_writes_agents_md_and_registers.
+    # setenv reaches the apply.py subprocess below too, which is the point.
+    monkeypatch.setenv("LOADOUT_PYTHON", sys.executable)
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
     res = apply.apply(tmp_path, "deepseek")
     assert set(res) == {"AGENTS.md"}
@@ -953,6 +960,8 @@ def test_dsh_registration_failure_after_prose_reports_the_real_writes(tmp_path, 
     """A registration write that fails after the prose landed must report what really landed: the
     prose result is kept in the failure, the CLI prints it and exits 2, and nothing claims a clean
     skip, a rollback or a registration that did not happen."""
+    # Registration subject, not discovery -- see test_dsh_host_writes_agents_md_and_registers.
+    monkeypatch.setenv("LOADOUT_PYTHON", sys.executable)
     (tmp_path / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
 
     def boom(*a, **k):
@@ -1630,6 +1639,39 @@ def test_cli_prints_enforcement_registered_or_skipped(tmp_path):
     assert "prose-only" not in r.stdout
     assert "disabled" not in r.stdout.lower()
     assert "settings.local.json" not in r.stdout
+
+
+def test_cli_discloses_the_codex_recovery_limitation_only_when_it_actually_registers(tmp_path):
+    """Opt-in-time disclosure. `--enforce-codex` buys a known unresolved limitation -- a session
+    that already edited cannot clear a stage from inside itself -- and the operator should hear it
+    when they opt in, not from the first denial. The paths that register nothing must stay silent,
+    or the note stops carrying information."""
+    def run(dest, *args, codex_home=None):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "LOADOUT.md").write_text(LOADOUT, encoding="utf-8")
+        env = os.environ.copy()
+        if codex_home is not None:
+            env["CODEX_HOME"] = str(codex_home)
+        r = subprocess.run([sys.executable, str(REPO / "scripts" / "apply.py"), str(dest), *args],
+                           capture_output=True, encoding="utf-8", env=env)
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+
+    mark = "recovery is the operator hatch: LOADOUT_ENFORCE=0"
+    home = tmp_path / "codex-home"
+    out = run(tmp_path / "on", "--host", "codex", "--enforce-codex", codex_home=home)
+    assert "enforcement: registered" in out
+    assert mark in out, out
+    assert (home / "hooks.json").is_file(), "the note must follow a registration that happened"
+
+    # same host, no flag: registration is skipped this invocation, so there is nothing to disclose
+    out = run(tmp_path / "off", "--host", "codex", codex_home=tmp_path / "codex-home-off")
+    assert "skipped this invocation" in out and mark not in out, out
+    assert not (tmp_path / "codex-home-off").exists()
+
+    # and it is Codex-specific: a Claude Code registration must not carry it
+    out = run(tmp_path / "cc", "--host", "claude-code")
+    assert "enforcement: registered" in out and mark not in out, out
 
 
 def test_cli_preserves_existing_dsh_registration_and_says_so(tmp_path, dsh_patch):

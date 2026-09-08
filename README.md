@@ -10,6 +10,7 @@ loadout into the project's agent config, and starts the work.
 - `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment; hook-command masking is best-effort, treat output as sensitive)
 - `scripts/apply.py` — idempotent writer for the `## Loadout` section (AGENTS.md + native file)
 - `scripts/gate.py` — Claude Code hook that makes the accepted loadout binding (deny edits before stage 1, block stopping while a binding stage is missing)
+- `scripts/skill_audit.py` — explicit audit of unfamiliar installed skills: binds each to its resolved path and the digest of its actual `SKILL.md` bytes, carries an agent's assessment through deterministic validation, and hands the recommendation step the ones still current (machine-local; no watcher, no model at runtime)
 
 ## Why an invoked skill, not a hook or plugin
 
@@ -79,11 +80,15 @@ because that host overrides the hook itself at that point (the count comes from 
 nothing on disk, so a fresh session inherits nothing); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
-Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 a registered gate crashed
-the desktop app's `app-server` child (hard abort about 20s after every launch, no respawn, every
-request then failing with "Codex app-server process is not available"); a schema-correct nested
-entry did it as readily as the malformed root-level one an older version wrote, so the cause is not
-yet understood and registration is skipped this invocation unless asked for. An existing
+Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 the desktop app's
+`app-server` child was observed hard-aborting about 20s after every launch while a gate was
+registered (no respawn, every request then failing with "Codex app-server process is not
+available"); a schema-correct nested entry correlated with it as readily as the malformed
+root-level one an older version wrote. The 2026-09-03 investigation in
+`docs/host-capability-matrix.md` found no evidence the gate causes it — the dumps abort under four
+different callers with no trace of the gate, two of the crashes ran no turn at all, and upstream
+reports the same fault with no hooks configured — so the cause is unknown and unattributed.
+Registration is skipped this invocation unless asked for, as caution about an unexplained fault. An existing
 hooks.json entry is left as-is; that is not a claim that enforcement is active or disabled. With the flag,
 `apply.py --host codex --enforce-codex` registers the gate in the user-level `~/.codex/hooks.json`
 and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads

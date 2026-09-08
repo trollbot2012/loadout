@@ -14,20 +14,60 @@ from pathlib import Path
 import gate  # same directory; owns Facts, write_shaped and STOP_REASON
 
 _CODEX_NAME = re.compile(r"^rollout-")
+_SUCCESS_STATUS = "completed"  # the only outcome the recorded rollout uses for a command that worked
 
 
 SKILL_READ_RE = re.compile(r"[\\/]skills[\\/]([^\\/]+)[\\/]SKILL\.md$", re.I)
+# a plugin-managed skill lives at <...>/plugins/cache/<market>/<plugin>/<version>/skills/<name>/SKILL.md.
+# LOADOUT.md names that skill qualified (`superpowers:systematic-debugging`), so the leaf alone can
+# never satisfy the stage and the Stop block repeats for a session that really did load it.
+PLUGIN_SKILL_READ_RE = re.compile(
+    r"[\\/]plugins[\\/]cache[\\/][^\\/]+[\\/]([^\\/]+)[\\/][^\\/]+[\\/]skills[\\/]([^\\/]+)[\\/]SKILL\.md$", re.I)
 
 
-def _skill_reads(parsed_cmd):
-    """Skill names whose SKILL.md a parsed shell command reads."""
+def skill_reads(parsed_cmd):
+    """Skill names whose SKILL.md a parsed shell command reads: the qualified `plugin:name` when
+    the path carries a plugin, and the leaf either way. Its only consumer is ledger credit below
+    -- gate.py used to reuse it to decide whether a pre-tool read was the pending stage's own
+    prerequisite, but that admission was withdrawn in CX3 and there is no second side to agree
+    with any more.
+    Ceiling: the leaf is kept because a standalone root (`.agents/skills/<name>/SKILL.md`) has no
+    qualified form, so an accepted line naming the bare leaf must still be satisfiable. That makes
+    bare-leaf keys collision-prone -- any plugin's copy of the leaf satisfies them.
+    Ceiling: `plugin:name` is a namespace key, not a physical origin. It discriminates the plugin
+    segment and the leaf; the market segment, the version segment and the cache root above them are
+    all outside the key, so a same-named plugin from another market or version -- or any tree of
+    that shape, including one inside the project -- satisfies the same stage. Prefer qualified keys
+    over bare leaves, but do not read them as proof of where the file came from."""
     names = set()
     for pc in parsed_cmd or []:
         if isinstance(pc, dict) and pc.get("type") == "read":
-            m = SKILL_READ_RE.search(str(pc.get("path") or ""))
+            path = str(pc.get("path") or "")
+            m = PLUGIN_SKILL_READ_RE.search(path)
+            if m:
+                names.add(f"{m.group(1)}:{m.group(2)}")
+            m = SKILL_READ_RE.search(path)
             if m:
                 names.add(m.group(1))
     return names
+
+
+def successful(item):
+    """True only when a completion record positively says the command succeeded.
+
+    The recorded rollout (tests/fixtures/codex-rollout.jsonl) is the whole supported outcome
+    vocabulary: status="completed" with exit_code=0 for a command that worked, status="failed"
+    with exit_code=1 for one that did not. Absent, null, unknown or wrong-typed status does not
+    *prove* success, and neither does present exit evidence that contradicts it or cannot be read,
+    so all of those are treated as unproven. Withholding is the safe direction here: a missed
+    credit repeats a Stop block the agent can clear by loading the skill again, a false credit
+    releases the gate on a load that never happened."""
+    if item.get("status") != _SUCCESS_STATUS:
+        return False
+    if "exit_code" not in item:  # omitted entirely: no contradicting evidence to weigh
+        return True
+    code = item["exit_code"]
+    return isinstance(code, int) and not isinstance(code, bool) and code == 0
 
 
 def find_rollout(session_id, home=None):
@@ -75,8 +115,12 @@ def transcript_facts(path):
                 # in command position, so test the wrapped command on its own as well as the whole
                 edited = edited or any(gate.write_shaped(c) for c in [" ".join(parts)] + parts)
                 # Codex has no skill event (recorded live 2026-09-02): loading a skill shows up as the
-                # agent reading <skills root>/<name>/SKILL.md, which is the strongest invocation signal
-                read = _skill_reads(it.get("parsed_cmd"))
+                # agent reading <skills root>/<name>/SKILL.md, which is the strongest invocation signal.
+                # Only a load the record says actually succeeded counts, and the credit and the progress
+                # event move together: a read that did not demonstrably happen is not progress either.
+                # `edited` above stays outcome-blind on purpose -- a failed write still requires the
+                # stages, and each asymmetry errs towards keeping the gate closed.
+                read = skill_reads(it.get("parsed_cmd")) if successful(it) else set()
                 if read:
                     invoked |= read
                     events.append("skill")

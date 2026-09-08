@@ -22,14 +22,16 @@ SCRUB = ["LOADOUT_HOST", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "VIBE_H
          "HERMES_HOME", "DSH_HOME", "XDG_CONFIG_HOME"] + [v for v, _ in scan.ENV_MARKERS]
 
 
-def run_scan(home, args, env=None, host="claude-code"):
+def run_scan(home, args, env=None, host="claude-code", cwd=None):
     e = {k: v for k, v in os.environ.items() if k not in SCRUB}
     e.update(USERPROFILE=str(home), HOME=str(home))
     if host:
         e["LOADOUT_HOST"] = host
     e.update(env or {})
+    # `cwd` matters only where a configured root is RELATIVE - a relative XDG_CONFIG_HOME is the
+    # one shipped way an extra skills root resolves against the working directory rather than home.
     return subprocess.run([sys.executable, str(SCAN), *args], capture_output=True,
-                          encoding="utf-8", env=e)
+                          encoding="utf-8", env=e, cwd=None if cwd is None else str(cwd))
 
 
 def scan_json(home, proj, extra=()):
@@ -272,6 +274,90 @@ def test_discovered_roots_and_brief(tmp_path):
     assert "## claude-code" in brief and "### skills" in brief
     assert "## codex" not in brief
     assert ".someagent (1)" in brief
+
+
+def collision_fixture(tmp_path):
+    """A home and a working directory that make two DISTINCT roots display the same legacy name.
+
+    `XDG_CONFIG_HOME=.config` is relative, so the shipped extra root `$XDG_CONFIG_HOME/agents/skills`
+    resolves against the working directory while dynamic discovery finds `~/.config/agents` under
+    home. Two different directories, and the old home-relative label spelled both `.config/agents`,
+    so whichever was found second replaced the first in the inventory, in `--hosts` and in the
+    audit that reads them."""
+    h, proj = make_fixture(tmp_path)
+    cwd = tmp_path / "cwd"
+    write(h / ".config/agents/skills/homeskill/SKILL.md", "---\ndescription: under home\n---\n")
+    write(cwd / ".config/agents/skills/cwdskill/SKILL.md", "---\ndescription: under cwd\n---\n")
+    return h, proj, cwd, {"XDG_CONFIG_HOME": ".config"}
+
+
+def discovered_at(inv, base):
+    return {k: v for k, v in inv["hosts"].items()
+            if v.get("discovered") and k.split("#")[0] == base}
+
+
+def test_two_roots_with_one_display_name_both_reach_the_inventory_and_selection(tmp_path):
+    """DISC1.2 at the production boundary. Both roots must appear, under names that are still
+    valid `--hosts` selectors, and each must carry its OWN skills.
+
+    The two roots are compared as ONE mapping, so an exchange of skill lists between them is a
+    different value rather than the same two sets. The cwd root is pinned in the RAW relative
+    spelling the scanner emits - a relative `XDG_CONFIG_HOME` is kept relative on purpose, and
+    nothing here rebases it against the child's working directory, so an accidental
+    absolutisation in production would be a different value too and could not pass."""
+    h, proj, cwd, env = collision_fixture(tmp_path)
+    inv = json.loads(run_scan(h, ["--json", str(proj)], env=env, cwd=cwd).stdout)
+
+    got = discovered_at(inv, ".config/agents")
+    assert len(got) == 2, got
+    assert {Path(v["root"]): tuple(e["name"] for e in v["assets"]["skills"])
+            for v in got.values()} == \
+        {h / ".config/agents": ("homeskill",),
+         Path(".config/agents"): ("cwdskill",)}, "a root kept the other root's skills"
+    # the ordinary labels of the same run are untouched
+    assert inv["hosts"][".someagent"]["discovered"] is True
+    assert inv["hosts"][".pi/agent"]["discovered"] is True
+
+    for label, rec in got.items():
+        r = run_scan(h, ["--check", "--hosts", label], env=env, cwd=cwd)
+        assert r.returncode == 1, (label, r.stdout, r.stderr)
+        assert f"- {label}: not installed" in r.stdout, (label, r.stdout)
+        assert str(Path(rec["root"]) / "skills") in r.stdout, (label, r.stdout)
+
+
+def test_self_install_discovery_and_the_unknown_host_list_carry_the_same_names(tmp_path):
+    """The self-install known set is the third producer, and `--hosts all` is where its discovery
+    reaches install targets. A discovered name was already ACCEPTED as a selector; what the
+    unknown-host diagnostic omitted was any sign those alternatives existed, so an operator who
+    mistyped one was left with only the fixed table to correct against.
+
+    The two discovered records and their roots are pinned BEFORE the loops below: a run that
+    discovered nothing would satisfy every `for label in labels` body vacuously, and a run that
+    discovered one would still be missing the second root this fixture exists to produce."""
+    h, proj, cwd, env = collision_fixture(tmp_path)
+    inv = json.loads(run_scan(h, ["--json", str(proj)], env=env, cwd=cwd).stdout)
+    got = discovered_at(inv, ".config/agents")
+    assert {Path(v["root"]) for v in got.values()} == \
+        {h / ".config/agents", Path(".config/agents")}, got
+    assert len(got) == 2, got
+    labels = sorted(got)
+
+    r = run_scan(h, ["--check", "--hosts", "all"], env=env, cwd=cwd)
+    assert r.returncode == 1, r.stderr
+    for label in labels:
+        assert f"- {label}: not installed" in r.stdout, (label, r.stdout)
+    assert "- claude-code: " in r.stdout, "a fixed host was displaced by a discovered name"
+
+    r = run_scan(h, ["--check", "--hosts", "bogus"], env=env, cwd=cwd)
+    assert r.returncode == 2
+    assert "unknown host(s): bogus" in r.stderr
+    assert "claude-code" in r.stderr
+    for label in labels:
+        assert label in r.stderr, (label, r.stderr)
+    # The GENERATED suffix carries no comma, which is what this checks: these two bases are
+    # comma-free, so no universal guarantee follows from it. An ordinary base that contains a
+    # comma is still split by the unchanged `--hosts` grammar.
+    assert "," not in "".join(labels), "a generated label must stay one token in a comma list"
 
 
 def test_deepseek_harness_is_a_first_class_host(tmp_path):

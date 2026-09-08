@@ -11,6 +11,7 @@ Usage:
   python scan.py --check [--hosts a,b|all]          # compare installed copies to this source
   python scan.py --self-install [--hosts a,b|all]   # copy this skill into harness skills dirs
 """
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,10 @@ MAX_LIST = 200
 MAX_HEAD = 16384    # bytes of SKILL.md read for frontmatter
 SKILL_FILES = ["SKILL.md", "README.md", "LICENSE", "scripts/scan.py", "scripts/apply.py", "scripts/gate.py",
                "scripts/gate_codex.py", "scripts/gate_dsh.py", "scripts/gate_dsh.mjs", "scripts/check_notes.py",
-               "references/skill-notes.md"]
+               "scripts/skill_audit.py", "references/skill-notes.md"]
+# references/skill-assessments.json is deliberately absent: it is audit state generated on one
+# machine and its records name that machine's absolute paths, so copying it into another install
+# would carry stale identities rather than knowledge. Each install regenerates it by auditing.
 
 
 def _root(env_var, default):
@@ -139,6 +143,112 @@ def load_json(path):
         return None
 
 
+def read_json_strict(path):
+    """(data, present), raising instead of collapsing a failed read into absence.
+
+    `load_json` answers "what can the display show", so it returns None for a file that is
+    missing, unreadable and malformed alike. A caller that must not turn a failure into an empty
+    inventory needs those told apart: only a genuinely absent file is (None, False), and anything
+    else raises. Absence is established here, never inferred from a failed read."""
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None, False          # established absence: the path is not there
+    except OSError as e:
+        raise OSError(f"cannot read {p}: {e}") from e
+    try:
+        # Strict, unlike load_json: errors="replace" turns an undecodable byte into U+FFFD and
+        # the file then PARSES. The damaged key no longer matches the one it was written to
+        # disable, so a corrupt settings file resolves to "enabled" - the exact default this
+        # reader exists to refuse. An encoding failure is a read failure.
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{p} is not valid UTF-8: {e}") from e
+    try:
+        return json.loads(text), True
+    except ValueError as e:
+        raise ValueError(f"malformed JSON in {p}: {e}") from e
+
+
+def stat_strict(p, what="path"):
+    """(stat_result, present), raising instead of collapsing a failed stat into absence.
+
+    `Path.is_dir()` cannot carry this distinction. Since 3.14 it delegates to os.path.isdir,
+    which is the C accelerator nt._path_isdir on Windows: it asks the OS and answers False for
+    an inaccessible path exactly as it does for a missing one, and never raises. A caller that
+    publishes state reads that False as "this root is gone" and deletes the records it held.
+    Only FileNotFoundError/NotADirectoryError establish absence here; every other OSError is
+    the caller's to handle."""
+    try:
+        return os.stat(p), True
+    except (FileNotFoundError, NotADirectoryError):
+        return None, False
+    except OSError as e:
+        raise OSError(f"cannot stat {what} {p}: {e}") from e
+
+
+def is_dir_strict(p, what="directory"):
+    """True/False for "is a directory", where False means established absence or a non-directory
+    and an inaccessible path raises instead of answering."""
+    return dir_role_strict(p, what) == ROOT_PRESENT
+
+
+# what a path whose ROLE is "a directory" turned out to be
+ROOT_PRESENT, ROOT_ABSENT, ROOT_NOT_DIR = "present", "absent", "not-a-directory"
+
+
+def dir_role_strict(p, what="root"):
+    """PRESENT / ABSENT / NOT_A_DIRECTORY for a path whose ROLE is to be a directory.
+
+    `is_dir_strict` answers one bit, and a caller that publishes state reads its False as absence.
+    For an ordinary entry met inside a directory that is right - a stray file is not an error. For
+    a root someone CONFIGURED it is not: "what you pointed me at is not a directory" and "it is
+    not there" are different facts, and only the second is the normal absence of an optional
+    harness. Reporting the first as an empty inventory deletes every record the root held, at
+    exit 0.
+
+    The exception class cannot carry the difference. Under a regular file Windows raises
+    FileNotFoundError with winerror 3 (ERROR_PATH_NOT_FOUND), never the POSIX NotADirectoryError,
+    and winerror 3 is also what a merely missing intermediate DIRECTORY gives. So the role is
+    decided by stat-ing THIS path, and callers name the anchor they configured rather than
+    walking ancestry - which would refuse a project that merely holds a file called `.agents`."""
+    st, present = stat_strict(p, what)
+    if not present:
+        return ROOT_ABSENT
+    return ROOT_PRESENT if stat.S_ISDIR(st.st_mode) else ROOT_NOT_DIR
+
+
+def anchor_role_strict(p, what="anchor"):
+    """dir_role_strict for a path someone explicitly NAMED, where apparent absence may be a
+    non-directory ANCESTOR rather than a missing anchor.
+
+    Stat-ing this path alone cannot tell "you pointed me underneath a file" from "it is not
+    there": below a regular file Windows raises FileNotFoundError with winerror 3, the same class
+    and the same winerror a merely missing intermediate directory gives, so substituting an
+    exception class decides nothing - the OS never produces NotADirectoryError there. The only
+    evidence is the ancestry. On apparent absence, walk up to the nearest component that EXISTS
+    and ask what it is: a file means the anchor's structure is wrong, while a directory - or
+    nothing existing at all - is the ordinary absence of an optional anchor.
+
+    Only anchors get this. `dir_role_strict` stays ancestry-blind for the convention directories
+    underneath them, so a project that merely holds a file called `.agents` is still absent."""
+    role = dir_role_strict(p, what)
+    if role != ROOT_ABSENT:
+        return role
+    for parent in Path(p).parents:
+        st, present = stat_strict(parent, what)
+        if not present:
+            continue
+        return ROOT_ABSENT if stat.S_ISDIR(st.st_mode) else ROOT_NOT_DIR
+    return ROOT_ABSENT
+
+
+def is_file_strict(p, what="file"):
+    st, present = stat_strict(p, what)
+    return present and stat.S_ISREG(st.st_mode)
+
+
 def link_target(p):
     """Resolved target if p is a symlink or a Windows junction, else None.
     os.path.isjunction is 3.12+, so fall back to the reparse-point attribute."""
@@ -169,18 +279,13 @@ def frontmatter(text):
     return text[3:end] if end != -1 else text[3:]
 
 
-def desc_of(path):
-    """Full description from a SKILL.md dir or a bare .md file's frontmatter.
-    Handles plain multi-line scalars and YAML block scalars (>, |)."""
-    md = path / "SKILL.md" if path.is_dir() else path
-    if not md.is_file() or md.suffix.lower() != ".md":
-        return ""
-    try:
-        with open(md, "rb") as f:
-            head = f.read(MAX_HEAD).decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-    fm = frontmatter(head)
+def description_from(fm):
+    """Description value out of an already-extracted frontmatter block, or "" when there is none.
+
+    Handles plain multi-line scalars and YAML block scalars (>, |). Split out from desc_of so a
+    caller that has already decoded the bytes itself - strictly, rather than with the
+    errors="replace" desc_of uses - reads the description through this same grammar instead of a
+    second, subtly different one."""
     m = DESC_RE.search(fm)
     if not m:
         return ""
@@ -203,7 +308,20 @@ def desc_of(path):
     return val[:MAX_DESC]
 
 
-def bundle_skills(p):
+def desc_of(path):
+    """Full description from a SKILL.md dir or a bare .md file's frontmatter."""
+    md = path / "SKILL.md" if path.is_dir() else path
+    if not md.is_file() or md.suffix.lower() != ".md":
+        return ""
+    try:
+        with open(md, "rb") as f:
+            head = f.read(MAX_HEAD).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    return description_from(frontmatter(head))
+
+
+def bundle_skills(p, strict=False):
     """A plugin bundle dropped into an asset dir carries no SKILL.md of its own; its skills sit
     one level down. Returns [(name, dir)] as <bundle>:<skill>, matching plugin-skill naming, or
     [] when this is an ordinary skill dir. Listing the bundle name instead would give the audit
@@ -213,22 +331,32 @@ def bundle_skills(p):
     that cannot be read returns [], which drops it from the listing: one unreadable directory
     must not abort an inventory spanning dozens of roots, and emitting the bare bundle name
     would put back the unclassifiable, uninvocable entry this function exists to remove.
+    `strict=True` raises instead: for the audit, a dropped bundle is not a cosmetic gap in a
+    listing, it is an installed identity silently missing from published state.
 
     Runs for every entry of every asset dir, so it stays two stat calls on the common path.
     A bundle sharing its name with an installed plugin would produce the same <bundle>:<skill>
     string in both `skills` and `plugin-skills`; left unguarded, as it needs a name collision
     at both levels to occur."""
-    if not p.is_dir() or (p / "SKILL.md").is_file():
+    # Under strict, every one of these stats is a place an inaccessible entry could otherwise
+    # answer "not a bundle" / "no SKILL.md" and drop an installed identity out of the audit
+    # without a word. A strict wrapper one level up does not help if the child helper it calls
+    # is the tolerant one.
+    isdir = (lambda q: is_dir_strict(q, "bundle entry")) if strict else Path.is_dir
+    isfile = (lambda q: is_file_strict(q, "bundle body")) if strict else Path.is_file
+    if not isdir(p) or isfile(p / "SKILL.md"):
         return None
     nested = p / "skills"
-    if not nested.is_dir():
+    if not isdir(nested):
         return None
     try:
         children = sorted(nested.iterdir())
-    except OSError:
+    except OSError as e:
+        if strict:
+            raise OSError(f"cannot list bundle {nested}: {e}") from e
         return []
     return [(f"{p.name}:{c.name}", c) for c in children
-            if c.is_dir() and (c / "SKILL.md").is_file()]
+            if isdir(c) and isfile(c / "SKILL.md")]
 
 
 def scan_dir(d):
@@ -370,17 +498,115 @@ def norm(p):
     return str(p).replace("\\", "/").rstrip("/")
 
 
-def claude_layer(rootp, proj):
-    """Plugins (+ their skills/agents/commands/hooks/MCP), registered hooks, and
-    enabled/disabled state from the settings stack: user, user-local, project, project-local."""
-    stack = []
+def _check_settings_maps(data, where):
+    """Validate the containers and values a strict reader is about to consume.
+
+    Checking only that the document is an object leaves two shapes through. An empty wrong-type
+    value collapses silently: `data.get("enabledPlugins") or {}` reads `[]` as "no plugins are
+    enabled", which is also what a correct empty map looks like. A NONEMPTY wrong-type value
+    escapes as a traceback out of `.update()` or `.items()` instead of the deterministic refusal
+    the boundary promises. Both are decided here, once, before any consumer indexes them.
+
+    `enabledPlugins` values are booleans: `bool(v)` would read the string "false" as enabled,
+    which is the same fail-open direction as an undecodable byte. An unsupported value is
+    refused rather than given a meaning the host never wrote."""
+    for key in ("enabledPlugins", "skillOverrides"):
+        v = data.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, dict):
+            raise ValueError(f"settings {key!r} is not an object: {where}")
+        for name in v:
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"settings {key!r} has an empty key: {where}")
+    for name, on in (data.get("enabledPlugins") or {}).items():
+        if not isinstance(on, bool):
+            raise ValueError(f"settings enabledPlugins[{name!r}] must be true or false, "
+                             f"got {on!r}: {where}")
+
+
+def settings_stack(rootp, proj, strict=False):
+    """[(label, data)] for each Claude Code settings file that exists, in precedence order.
+
+    Split out of claude_layer so another reader can resolve the same enabled/disabled facts from
+    the same four files rather than inventing a second, divergent notion of "enabled".
+
+    `strict=True` tells an absent settings file - normal, most machines have two of the four -
+    apart from one that exists and could not be read or parsed. The display can treat both as
+    "no settings"; a reader deciding whether a skill is enabled cannot, because doing so silently
+    resolves an unreadable disable to the default, which is enabled."""
+    out = []
     for label, p in (("~/.claude/settings.json", rootp / "settings.json"),
                      ("~/.claude/settings.local.json", rootp / "settings.local.json"),
                      (".claude/settings.json", proj / ".claude" / "settings.json"),
                      (".claude/settings.local.json", proj / ".claude" / "settings.local.json")):
-        data = load_json(p)
+        if strict:
+            data, present = read_json_strict(p)
+            if present and not isinstance(data, dict):
+                raise ValueError(f"settings file is not an object: {Path(p).expanduser()}")
+            if present:
+                _check_settings_maps(data, Path(p).expanduser())
+        else:
+            data = load_json(p)
         if isinstance(data, dict):
-            stack.append((label, data))
+            out.append((label, data))
+    return out
+
+
+def installed_plugins(rootp, enabled, strict=False):
+    """[(name, installPath or None, on, version)] from the Claude Code plugin manifest.
+
+    `enabled` is the merged enabledPlugins map from settings_stack. Split out so the skill audit
+    reaches plugin-provided skills through the scanner's own manifest reading, canonical
+    `plugin:skill` naming and enabled state rather than a second registry.
+
+    `strict=True` refuses a manifest that exists but does not parse. Reading it as `{}` is the
+    same byte sequence as "no plugins are installed", and an audit cannot tell those apart after
+    the fact - it just publishes an inventory with every plugin skill missing."""
+    mf = rootp / "plugins" / "installed_plugins.json"
+    if strict:
+        data, present = read_json_strict(mf)
+        if not present:
+            data = {}
+        elif not isinstance(data, dict):
+            raise ValueError(f"plugin manifest is not an object: {mf}")
+        plugins = data.get("plugins")
+        if plugins is None:
+            plugins = {}
+        # `plugins` as a list is the shape that reached `.items()` and escaped as an
+        # AttributeError; as an EMPTY list it is worse, because `or {}` reads it as "no
+        # plugins installed" and the audit publishes an inventory with every plugin skill
+        # deleted out of it. Neither is an installed-plugin manifest.
+        if not isinstance(plugins, dict):
+            raise ValueError(f"plugin manifest 'plugins' is not an object: {mf}")
+        for key, recs in plugins.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"plugin manifest has an empty plugin key: {mf}")
+            # An entry that is not a nonempty list of objects currently degrades to `{}`,
+            # which is an installed identity with no install path - indistinguishable from a
+            # plugin that legitimately provides no directory.
+            if not isinstance(recs, list) or not recs or not isinstance(recs[0], dict):
+                raise ValueError(f"plugin manifest entry {key!r} must be a non-empty list of "
+                                 f"objects: {mf}")
+            ip = recs[0].get("installPath")
+            if ip is not None and (not isinstance(ip, str) or not ip):
+                raise ValueError(f"plugin manifest entry {key!r} has an unusable "
+                                 f"installPath: {mf}")
+    else:
+        data = load_json(mf) or {}
+        plugins = data.get("plugins") or {}
+    out = []
+    for key, recs in sorted(plugins.items()):
+        rec = recs[0] if isinstance(recs, list) and recs and isinstance(recs[0], dict) else {}
+        out.append((key.split("@")[0], rec.get("installPath"),
+                    bool(enabled.get(key, True)), rec.get("version", "")))
+    return out
+
+
+def claude_layer(rootp, proj):
+    """Plugins (+ their skills/agents/commands/hooks/MCP), registered hooks, and
+    enabled/disabled state from the settings stack: user, user-local, project, project-local."""
+    stack = settings_stack(rootp, proj)
     enabled, overrides, mcp_off = {}, {}, set()
     hooks = []
     for label, data in stack:
@@ -392,16 +618,11 @@ def claude_layer(rootp, proj):
 
     layer = {"plugins": [], "plugin-skills": [], "agents": [], "commands": [],
              "hooks": hooks, "mcp": [], "skill_status": overrides, "mcp_off": mcp_off}
-    data = load_json(rootp / "plugins" / "installed_plugins.json") or {}
-    for key, recs in sorted((data.get("plugins") or {}).items()):
-        name = key.split("@")[0]
-        rec = recs[0] if isinstance(recs, list) and recs and isinstance(recs[0], dict) else {}
-        on = bool(enabled.get(key, True))
-        ent = {"name": name, "desc": rec.get("version", "")}
+    for name, ip, on, version in installed_plugins(rootp, enabled):
+        ent = {"name": name, "desc": version}
         if not on:
             ent["status"] = "off"
         layer["plugins"].append(ent)
-        ip = rec.get("installPath")
         if not ip:
             continue
         ip = Path(ip)
@@ -470,30 +691,198 @@ def detect_host():
     return "unknown", "no reliable signal; set LOADOUT_HOST=<host>"
 
 
-def discover_roots(known):
+def discovery_key(p):
+    """The comparison key for a discovery root: one lexical string, no filesystem read.
+
+    `norm` cannot serve here. It rewrites a literal backslash into a separator, so on a POSIX
+    filesystem - where a backslash is an ordinary filename character - `~/.config/opencode` and a
+    genuinely distinct `~/.config\\opencode` reduce to the same string. A known set holding either
+    one then excludes BOTH, and the installed root nobody ever declared known is dropped before
+    anything inspects it; the audit reads that as those skills having been uninstalled. It also
+    strips trailing separators, so a filesystem root stops naming a directory at all.
+
+    The key is `Path(path).as_posix()` over an already-expanded path. It preserves exactly the
+    distinctions `norm` erased, not every raw character of the spelling handed in: `Path` has
+    already dropped a trailing separator and a redundant `.` before `as_posix` spells the
+    separators one way. That is what a comparison of already-expanded paths needs and all it
+    needs. Nothing here resolves, absolutises, case-folds or touches disk, so two spellings of one
+    physical directory are still two keys - the same lexical limit the labels below carry. `norm`
+    itself is unchanged: the settings/project comparison it serves is a different question about a
+    different domain, and the three known-set producers agree on this REPRESENTATION without
+    their deliberately different populations being unified."""
+    return Path(p).as_posix()
+
+
+def _dynamic_candidates(home, strict):
+    """<parent>/<entry>/skills for each of the two parents dynamic discovery walks INTO by name.
+
+    Replaces `home.glob(".*/skills")`, which cannot report what it could not read: pathlib's
+    globber swallows every OSError its own scandir raises, so an unreadable home and an empty one
+    are one answer, and a ~/.config present as a REGULAR FILE reports "no dynamic roots" exactly
+    as an absent one does. Neither is an empty inventory, and a strict caller publishes over one.
+    Catching it here is catching it at the real parent/list boundary; a wrapper around glob cannot
+    see the errors glob already swallowed.
+
+    The two parents carry a directory ROLE; the entries inside them do not, and that distinction
+    is the whole of the rule. ~/.gitconfig is a file and is simply not a harness root, so it is
+    skipped exactly as the glob skipped it, while a ~/.config that is a file disables discovery of
+    every harness underneath it. Only an INACCESSIBLE entry raises - that one is genuinely
+    unknown - and the terminal <entry>/skills is left to the caller's own strict check rather than
+    being decided twice.
+
+    The tolerant display keeps the old suppression: it only has to show what it can see. The two
+    modes differ in what they RAISE, never in what they find."""
+    out = []
+    for base, dotted in ((home, True), (home / ".config", False)):
+        if strict:
+            role = dir_role_strict(base, "discovery parent")
+            if role == ROOT_NOT_DIR:
+                raise NotADirectoryError(f"discovery parent {base} is not a directory")
+            if role == ROOT_ABSENT:
+                continue  # an absent ~/.config is normal
+        try:
+            with os.scandir(base) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError as e:
+            if strict:
+                raise OSError(f"cannot enumerate discovery parent {base}: {e}") from e
+            continue
+        for e in entries:
+            if dotted and not e.name.startswith("."):
+                continue
+            try:
+                if not e.is_dir():
+                    continue
+            except OSError as err:
+                if strict:
+                    raise OSError(f"cannot stat discovery entry {e.path}: {err}") from err
+                continue
+            out.append(Path(e.path) / "skills")
+    return out
+
+
+def _display_base(root, home):
+    """The legacy public name for a discovered root: home-relative when it can be, else the path.
+
+    Kept exactly as it was, lossy `norm` included, because this is presentation and its ordinary
+    output - `.someagent`, `.pi/agent`, `.config/agents` - is what a user types into `--hosts`.
+    It is only a CANDIDATE now; `_labelled` decides whether it survives. The one repair is the
+    anchor, where the home-relative branch misses and `norm` then strips the whole path down to
+    the empty string, naming nothing at all. Only an EMPTY base is repaired. A nonempty legacy
+    label is kept exactly as it is, including the ambiguous `C:` a Windows drive root produces -
+    it names its own stored root through the mapping below, and renaming it would change a name
+    users already type."""
+    try:
+        base = norm(root.relative_to(home))
+    except ValueError:
+        base = norm(root)
+    return base or discovery_key(root)
+
+
+def _collision_label(base, key, occupied):
+    """A deterministic label for one member of a group whose display base is already taken.
+
+    Derived from the root key alone, so the same inventory always maps the same way and arrival
+    order never picks a winner. The digest is SHORT because this is a name someone types, and a
+    short prefix is exactly what can already be occupied - by another key that agrees on it, or
+    by an ordinary label that merely looks generated. So it widens, and past the whole digest it
+    counts: the candidate sequence is unbounded and `occupied` is finite, so this terminates even
+    if two distinct keys were to agree on all 64 hex digits. No comma appears in the suffix, so
+    suffixing never introduces a split of its own in the comma-delimited selector list. That is
+    not a guarantee the whole label is one token: the suffix is never selected on its own, and a
+    base that already carries a comma is split by the unchanged grammar either way."""
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+    n = 8
+    cand = f"{base}#{digest[:n]}"
+    while cand in occupied:
+        n += 1
+        cand = f"{base}#{digest[:n]}" if n <= 64 else f"{base}#{digest}~{n - 64}"
+    return cand
+
+
+def _labelled(records, home):
+    """{public label: record} from {discovery key: record}, losing no key.
+
+    Two passes, because doing it in one is what lost roots. A label used to be assigned the moment
+    its root was found, so two distinct roots sharing a display base overwrote each other and the
+    later one silently replaced the earlier - in the JSON, in the rendering, in `--hosts` and in
+    the audit's own candidate list. Collecting first makes a collision VISIBLE before any name is
+    handed out. `as_posix` on the root does not remove the collision: an `XDG_CONFIG_HOME` given
+    as the relative `.config` contributes the extra root `.config/agents` while dynamic discovery
+    contributes `<home>/.config/agents`, two distinct keys with one display base.
+
+    The whole occupied namespace is reserved before allocation - the fixed host keys and the
+    shared pool, which a discovered label would otherwise overwrite through `inv["hosts"].update`
+    and `install_targets`, and every base that is already unique, which must stay byte-identical
+    to what it is today. Only what actually collides is renamed, and the result is ordered by
+    label so the mapping does not depend on enumeration order either."""
+    bases = {}
+    for key in sorted(records):
+        bases.setdefault(_display_base(Path(records[key]["root"]), home), []).append(key)
+
+    occupied = set(HOSTS) | {SHARED}
+    keep = {keys[0]: base for base, keys in bases.items()
+            if len(keys) == 1 and base not in occupied}
+    occupied.update(keep.values())
+
+    out = {}
+    for base, keys in sorted(bases.items()):
+        for key in keys:
+            label = keep.get(key) or _collision_label(base, key, occupied)
+            occupied.add(label)
+            out[label] = records[key]
+    return dict(sorted(out.items()))
+
+
+def discover_roots(known, strict=False):
     """Any other <root>/skills dir holding SKILL.md children, e.g. the ~60 agents the skills CLI
-    installs into. Names only; never a self-install target unless --hosts all."""
+    installs into. Names only; never a self-install target unless --hosts all.
+
+    `strict=True` raises on a root that exists but cannot be enumerated, rather than recording
+    it as holding nothing and therefore dropping it from the result entirely. That now covers the
+    PARENTS the walk descends through as well as the roots themselves."""
     home = Path.home()
-    cands = list(home.glob(".*/skills")) + list((home / ".config").glob("*/skills"))
+    cands = _dynamic_candidates(home, strict)
     cands += [Path(p).expanduser() for p in EXTRA_SKILL_ROOTS]
     found = {}
+
+    def terminal_is_root(q):
+        """The caller's own strict check on the terminal <entry>/skills, which
+        `_dynamic_candidates` deliberately leaves undecided.
+
+        `is_dir_strict` answers one bit and collapses the two non-directory answers into it. The
+        terminal carries a directory ROLE - it is the thing being discovered as a root - so a
+        regular file sitting where a harness's skills directory belongs is a structural mistake
+        about that root, not the ordinary absence of an optional one. Answering False for it
+        drops the root silently and the audit reads that as those skills having been uninstalled.
+        Only the terminal is judged this way: the ENTRIES walked over to reach it carry no such
+        role, so ~/.gitconfig and every other file beneath home is still simply skipped."""
+        role = dir_role_strict(q, "discovered root")
+        if role == ROOT_NOT_DIR:
+            raise NotADirectoryError(f"discovered root {q} is not a directory")
+        return role == ROOT_PRESENT
+
+    isdir = terminal_is_root if strict else Path.is_dir
+    isfile = (lambda q: is_file_strict(q, "discovered body")) if strict else Path.is_file
     for d in cands:
         root = d.parent
-        if not d.is_dir() or norm(root) in known:
+        # Same rule as the enumeration below, one call earlier: a dynamic root that cannot be
+        # stat-ed is not a root that holds nothing. Answering False here drops it from the
+        # result entirely, which the audit then reads as those skills having been uninstalled.
+        if not isdir(d) or discovery_key(root) in known:
             continue
         try:
             entries = [{"name": p.name, "desc": ""} for p in sorted(d.iterdir())
-                       if not p.name.startswith(".") and (p / "SKILL.md").is_file()]
-        except OSError:
+                       if not p.name.startswith(".") and isfile(p / "SKILL.md")]
+        except OSError as e:
+            if strict:
+                raise OSError(f"cannot list discovered root {d}: {e}") from e
             entries = []
         if not entries:
             continue
-        try:
-            label = norm(root.relative_to(home))
-        except ValueError:
-            label = norm(root)
-        found[label] = {"root": str(root), "assets": {"skills": entries}, "discovered": True}
-    return found
+        found[discovery_key(root)] = {"root": str(root), "assets": {"skills": entries},
+                                      "discovered": True}
+    return _labelled(found, home)
 
 
 def cross_host(inv):
@@ -541,8 +930,11 @@ def install_targets(hosts_arg, discovered):
         wanted = [w.strip() for w in hosts_arg.split(",") if w.strip()]
         unknown = [w for w in wanted if w not in table and w not in discovered]
         if unknown:
-            print(f"unknown host(s): {', '.join(unknown)}; known: {', '.join(sorted(table))}",
-                  file=sys.stderr)
+            # A valid discovered label was already accepted two lines below; this message was
+            # never what rejected one. What it omitted was any sign those alternatives existed,
+            # so an operator who MISTYPED a discovered name saw only the fixed table.
+            print(f"unknown host(s): {', '.join(unknown)}; "
+                  f"known: {', '.join(sorted(set(table) | set(discovered)))}", file=sys.stderr)
             return None
         return {w: (table.get(w) or Path(discovered[w]["root"]) / "skills") for w in wanted}
     return present
@@ -553,7 +945,8 @@ def self_install(hosts_arg, check_only):
     if not (src / "SKILL.md").is_file():
         print(f"self-install: no SKILL.md next to {src}", file=sys.stderr)
         return 1
-    known = {norm(Path(r).expanduser()) for r, _ in HOSTS.values()} | {norm(Path(SHARED_ROOT).expanduser())}
+    known = {discovery_key(Path(r).expanduser()) for r, _ in HOSTS.values()} \
+        | {discovery_key(Path(SHARED_ROOT).expanduser())}
     targets = install_targets(hosts_arg, discover_roots(known))
     if targets is None:
         return 2
@@ -651,7 +1044,7 @@ def build_inventory(project_dir):
     known = set()
     for hname, (root, kinds) in HOSTS.items():
         rootp = Path(root).expanduser()
-        known.add(norm(rootp))
+        known.add(discovery_key(rootp))
         if not rootp.is_dir():
             continue
         assets = {}
@@ -684,7 +1077,7 @@ def build_inventory(project_dir):
         inv["hosts"][hname] = entry
 
     shared = Path(SHARED_ROOT).expanduser()
-    known.add(norm(shared))
+    known.add(discovery_key(shared))
     if shared.is_dir():
         assets = {}
         for kind in ("skills", "commands"):

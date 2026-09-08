@@ -46,6 +46,11 @@ MCP_MUTATING = frozenset({
 SURFACE_FILES = {"loadout.md", "agents.md", "claude.md", "settings.json", "settings.local.json", "gate.py", "apply.py",
                  "cordis.patch.yml", "cordis.yml", "gate_dsh.mjs"}  # lower-cased; the cordis files are dsh loader config
 COMMAND_RE = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
+# Codex-only opt-out: a LOADOUT.md may declare itself advisory. Exact line, no leading whitespace;
+# horizontal whitespace after the colon and trailing is allowed. It releases the stage requirement
+# only -- the operator-owned surface below stays protected, because a policy file that could switch
+# off protection of gate.py and of itself would be the agent-side override this gate does not have.
+PROSE_ONLY_RE = re.compile(r"^Enforcement:[ \t]*prose only[ \t]*\r?$", re.M | re.I)
 HATCH = "Operator hatch: LOADOUT_ENFORCE=0."
 STOP_BLOCK_CAP = 8  # own runaway guard; Claude Code applies the same cap on its side
 
@@ -266,6 +271,38 @@ def _parent_transcript(tp):
         return None
 
 
+# On Codex the only recorded skill-load mechanism is a shell read -- that is what the recorded
+# rollout fixture and the current adapter show, not a contract every current Codex host is known to
+# follow; no capture of a host-native load exists either way. Before stage 1 every Bash command
+# except the exact validated apply.py bootstrap is denied, and the bootstrap cannot satisfy a
+# stage, so a session that already edited stays blocked at Stop (Codex has no host-side cap) with
+# no Bash command this path admits that could clear the stage. Whether some host-native read
+# primitive exists outside this path is unknown. There was an exception for exactly that: one fully
+# tokenised `cat <path>` or `Get-Content -LiteralPath <path>` whose argument resolved to the
+# pending stage's own SKILL.md. It is withdrawn, and with it the Q3 qualification criterion that
+# pinned those two exact read forms is superseded -- the frozen packet still records it, but no
+# current behaviour follows it. Independent execution ran that byte-identical command with a
+# replacement `cat` earlier on PATH: admitted, exit 0, an unrelated body, an unrelated file
+# written (WORK_LOGS/LOADOUT_OC1_CX2_CODEX_EVIDENCE_2026_09_06/path-hijack-repro.txt, reproduced
+# by tests/test_gate_codex_cx.py::test_cx3_flow_the_frozen_path_replacement_is_denied_and_its_body
+# _never_runs). The gate only ever saw the command text; what that text resolves to is the shell's
+# decision, so no grammar over the text can make it a read. Narrowing was rejected for the same
+# reason -- rejecting `$`, `~` and the rest closes the expansion forms reviewers found, but not
+# the reproducer. Bare `Get-Content` is unproven by the same argument and is not kept as a
+# substitute; PowerShell resolves aliases and functions ahead of cmdlets.
+# What would earn an allowance back: an observed host-native read primitive that does not resolve
+# through the command text -- not a spelling, a path suffix, or an executable discovered on the
+# coordinating machine's PATH. Until then this stays denied and the operator hatch is the recovery,
+# which is what CODEX_NO_PREREQ tells the session. See docs/host-capability-matrix.md.
+CODEX_NO_PREREQ = (" On Codex the recorded way to load a skill is a shell read, and this gate "
+                   "admits no such read on the enforced pending-stage path -- the one Bash "
+                   "command it lets through before the stage is the validated apply.py "
+                   "bootstrap, and that cannot load a skill. Whether this host also has a "
+                   "non-shell read primitive is unknown here; ungated tools and a prose-only "
+                   "project never reach this path at all. So a session that has already edited "
+                   "is released by the operator rather than from inside it.")
+
+
 def _deny(reason):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": reason}}
@@ -333,12 +370,17 @@ def decide(mode, hook, env=None, host=None):
             return fault_output(mode)
         return None
     try:
-        stages = binding_stages(loadout.read_text(encoding="utf-8", errors="replace"))
+        policy = loadout.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         sys.stderr.write(f"loadout gate: unreadable policy {loadout}: {e}\n")
         return None
+    stages = binding_stages(policy)
     if not stages:
         return None
+    # only the governing policy's own header counts, so a sibling or ancestor project's opt-out
+    # never releases this one
+    is_codex = resolve_host(tp, host) == "codex"
+    prose_only = bool(PROSE_ONLY_RE.search(policy)) and is_codex
     if mode == "pre":
         if tool == "Bash":
             cmd = str(inp.get("command") or "")
@@ -358,6 +400,8 @@ def decide(mode, hook, env=None, host=None):
                              f"the agent may not write it at any stage. Re-audits run under the hatch. {HATCH}")
         else:
             return None
+        if prose_only:  # after the surface check, never before it
+            return None
         stage, skill = stages[0]
         invoked = set(facts.invoked)
         if hook.get("agent_id"):  # a subagent is judged against its parent session too
@@ -367,9 +411,10 @@ def decide(mode, hook, env=None, host=None):
         if skill in invoked:
             return None
         return _deny(f"Loadout gate: invoke `{skill}` ({stage}) before editing or running commands. "
-                     f"Details in LOADOUT.md. {HATCH}")
+                     f"Details in LOADOUT.md."
+                     f"{CODEX_NO_PREREQ if is_codex else ''} {HATCH}")
     if mode == "stop":
-        if not facts.edited:
+        if prose_only or not facts.edited:
             return None
         missing = [(s, k) for s, k in stages if k not in facts.invoked]
         if not missing:

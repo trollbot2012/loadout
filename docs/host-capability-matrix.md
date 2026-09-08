@@ -77,7 +77,25 @@ live-table case when no machine-local `references/skill-notes.md` has been gener
 - Ledger: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`; lines `session_meta`, `turn_context`, `event_msg`, `response_item`. Verified live: edits = `item_completed` FileChange, shell = CommandExecution (`parsed_cmd` reads), skill use = a parsed read of `<skills>/<name>/SKILL.md` only (a `$name` mention is not invocation), injected Stop-block reason = `HookPrompt` item. PreToolUse stdin is Claude-shaped (`Bash`, `apply_patch`); Stop stdin has no `transcript_path` (located by `session_id`). Hooks run through PowerShell here: `command_windows` uses the call operator. Codex has no block cap and the gate adds none on this host: blocking continues until the operator intervenes.
 - Proof (headless `codex exec`, 2026-09-02, re-run after the contract tightening): run 1, no skill read: 4 edit denials, 36 consecutive Stop blocks, never released, ended only when the 150 s external timeout killed it (exit 124), README untouched. Run 2, SKILL.md actually read: no denials, the edit applied, 4 Stop blocks until both binding stages' SKILL.md had been read, then a clean finish (exit 0).
 - Note: Codex does not surface hook stderr, so the gate's runaway note is invisible to the operator; repeated `hook: Stop Blocked` lines are the only signal. `hook: Stop Failed` lines in these runs come from an unrelated pre-existing Stop hook on the machine, not from the gate. Run 2 with `$planning-with-files`: skill read counted, edit allowed, Stop blocked with review missing until the review skill was read.
-- **Crash investigation, 2026-09-03 — the gate is not the cause.** A parallel session reported that a
+- **Pre-stage read primitive: UNQUALIFIED, 2026-09-06.** On the behaviour recorded for this host —
+  `tests/fixtures/codex-rollout.jsonl` and the current adapter — loading a skill *is* a shell read.
+  No capture of a host-native load exists, so that is the observed mechanism, not a claim about
+  every current Codex host. Every shell command except the exact validated `apply.py` bootstrap is
+  denied before stage 1, and the bootstrap cannot load a skill, so a session that already edited has
+  no in-session way to satisfy the stage. A pinned-spelling allowance (`cat '<path>'` /
+  `Get-Content -LiteralPath '<path>'` resolving to the pending stage's own SKILL.md) was tried and
+  **withdrawn**: independent execution ran that byte-identical command with a replacement `cat`
+  earlier on `PATH` and it was admitted, exited 0, printed an unrelated body and wrote an unrelated
+  file (`WORK_LOGS/LOADOUT_OC1_CX2_CODEX_EVIDENCE_2026_09_06/path-hijack-repro.txt`; reproduced as a
+  standing control in `tests/test_gate_codex_cx.py`). The gate sees command *text*; what that text
+  resolves to is the shell's decision, so no grammar over the text — and no `$`/`~` blacklist — makes
+  it a read. Bare `Get-Content` is unproven by the same argument (PowerShell resolves aliases and
+  functions ahead of cmdlets) and is not retained as a substitute. **Consequence: the Codex
+  prerequisite/recovery flow is PARTIAL.** The operator hatch is the only recovery, and the pre
+  denial now says so. What would qualify a primitive: observed host-native read behaviour whose
+  identity does not come from the command text — not a spelling, not a path suffix, and not an
+  executable discovered on a coordinating machine's `PATH`.
+- **Crash investigation, 2026-09-03 — no causal attribution established; cause unknown.** A parallel session reported that a
   registered gate crashed the Codex 0.152.1 desktop app-server (0xc0000409 about 20 s after launch)
   and made enforcement opt-in behind `--enforce-codex`. The crashes are real: Windows Error
   Reporting shows four `codex.exe` faults on 2026-09-02 (22:56 and 23:00 desktop app-server, 23:40
