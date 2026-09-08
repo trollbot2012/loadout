@@ -527,6 +527,12 @@ def _resolve_exe(name, candidates):
 
 PWSH, PWSH_SEARCHED = _resolve_exe("powershell", _PWSH_CANDIDATES)
 POSIX_SH, POSIX_SEARCHED = _resolve_exe("sh", _SH_CANDIDATES)
+# Git's bin/sh.exe launcher prepends its own tools to PATH. Use the actual
+# shell so the negative control can deliberately replace cat through PATH.
+if os.name == "nt" and POSIX_SH:
+    _direct_sh = Path(POSIX_SH).parent.parent / "usr" / "bin" / "sh.exe"
+    if Path(POSIX_SH).parent.name.lower() == "bin" and _direct_sh.is_file():
+        POSIX_SH = str(_direct_sh)
 CAT, CAT_SEARCHED = _resolve_exe("cat", _CAT_CANDIDATES)
 SHELLS = {"pwsh": (PWSH, lambda c: [PWSH, "-NoProfile", "-NonInteractive", "-Command", c]),
           "posix": (POSIX_SH, lambda c: [POSIX_SH, "-c", c])}
