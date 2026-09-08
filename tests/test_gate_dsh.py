@@ -20,6 +20,13 @@ LOADOUT = "# Loadout: x\n\n## Accepted\n- planning: `planner`\n- review: `review
 
 
 def project(tmp_path):
+    # Same ground check as tests/test_gate.py::assert_no_inherited_policy, and for the same
+    # reason: this module's vanished-loadout case asserts that no policy governs, which a
+    # LOADOUT.md above the basetemp would quietly contradict.
+    inherited = gate.find_loadout(tmp_path)
+    assert inherited is None, (
+        f"fixture root {tmp_path} inherits {inherited}; run pytest with --basetemp outside any "
+        "tree carrying a LOADOUT.md. The walk-up is production behaviour, not the bug.")
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
@@ -111,6 +118,32 @@ def test_the_enforcement_surface_is_operator_owned_on_dsh(tmp_path):
     for cmd in ("rm ~/.dsh/profiles/headless/cordis.patch.yml", "echo x > cordis.patch.yml"):
         out = run_gate("pre", hook(proj, done, tool_name="pwsh", tool_input={"command": cmd}))
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", cmd
+
+
+def test_the_prose_only_marker_never_releases_dsh(tmp_path):
+    """`Enforcement: prose only` is a Codex-scoped opt-out. Static reading of gate.py says the
+    branch is Codex-only, but DSH normalizes its own payload and has its own ledger, so the
+    regression is exercised here rather than inferred: a DSH LOADOUT.md carrying the marker must
+    still gate pre, still block Stop, and still own the enforcement surface.
+    """
+    proj = project(tmp_path)
+    (proj / "LOADOUT.md").write_bytes(("# Loadout: x\nEnforcement: prose only\n\n## Accepted\n"
+                                       "- planning: `planner`\n- review: `reviewer`\n").encode("utf-8"))
+    out = run_gate("pre", hook(proj, [], tool_name="write", tool_input={"file_path": str(proj / "a.py")}))
+    assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", "pre released by the marker"
+    assert "`planner`" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    # the Codex-only limitation note must not appear on DSH either
+    assert "no shell command is admitted" not in out["hookSpecificOutput"]["permissionDecisionReason"]
+    out = run_gate("pre", hook(proj, [], tool_name="pwsh", tool_input={"command": "git status --short"}))
+    assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", "shell released by the marker"
+    surface = run_gate("pre", hook(proj, [skill_event("planner")], tool_name="write",
+                                   tool_input={"file_path": "LOADOUT.md"}))
+    assert surface and surface["hookSpecificOutput"]["permissionDecision"] == "deny", \
+        "the marker must never release the operator-owned surface"
+    edited = [skill_event("planner"), tool_event("write", file="a.py")]
+    stop = run_gate("stop", hook(proj, edited))
+    assert stop and stop["decision"] == "block" and "review (`reviewer`)" in stop["reason"], \
+        "Stop released by the marker"
 
 
 def test_stop_blocks_until_every_binding_stage_ran(tmp_path):

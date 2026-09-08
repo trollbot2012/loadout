@@ -7,9 +7,10 @@ the best workflow of skills for the project you're building, wires the accepted
 loadout into the project's agent config, and starts the work.
 
 - `SKILL.md` — the skill (portable agent-skills format)
-- `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment)
+- `scripts/scan.py` — stdlib-only inventory scanner (facts; the model does the judgment; hook-command masking is best-effort, treat output as sensitive)
 - `scripts/apply.py` — idempotent writer for the `## Loadout` section (AGENTS.md + native file)
 - `scripts/gate.py` — Claude Code hook that makes the accepted loadout binding (deny edits before stage 1, block stopping while a binding stage is missing)
+- `scripts/skill_audit.py` — explicit audit of unfamiliar installed skills: binds each to its resolved path and the digest of its actual `SKILL.md` bytes, carries an agent's assessment through deterministic validation, and hands the recommendation step the ones still current (machine-local; no watcher, no model at runtime)
 
 ## Why an invoked skill, not a hook or plugin
 
@@ -79,19 +80,30 @@ because that host overrides the hook itself at that point (the count comes from 
 nothing on disk, so a fresh session inherits nothing); the shell write check is a heuristic that can misfire on an innocent
 command and does not see writes made by an arbitrary script file; a delegated subagent is
 gated against the parent session's transcript; the transcript may lag the last tool call.
-Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 a registered gate crashed
-the desktop app's `app-server` child (hard abort about 20s after every launch, no respawn, every
-request then failing with "Codex app-server process is not available"); a schema-correct nested
-entry did it as readily as the malformed root-level one an older version wrote, so the cause is not
-yet understood and the wiring stays prose-only unless asked for. With the flag,
+Codex CLI: **off by default — pass `--enforce-codex`.** On Codex 0.152.1 the desktop app's
+`app-server` child was observed hard-aborting about 20s after every launch while a gate was
+registered (no respawn, every request then failing with "Codex app-server process is not
+available"); a schema-correct nested entry correlated with it as readily as the malformed
+root-level one an older version wrote. The 2026-09-03 investigation in
+`docs/host-capability-matrix.md` found no evidence the gate causes it — the dumps abort under four
+different callers with no trace of the gate, two of the crashes ran no turn at all, and upstream
+reports the same fault with no hooks configured — so the cause is unknown and unattributed.
+Registration is skipped this invocation unless asked for, as caution about an unexplained fault. An existing
+hooks.json entry is left as-is; that is not a claim that enforcement is active or disabled. With the flag,
 `apply.py --host codex --enforce-codex` registers the gate in the user-level `~/.codex/hooks.json`
 and grants hook trust in `config.toml` (the hash is reproduced from Codex's source); the gate reads
 the rollout transcript, treats `apply_patch` as an edit, and counts a skill as invoked only when the
 agent actually reads its SKILL.md (a `$name` mention is intent, not invocation). Codex has no
 Stop-block cap of its own and the gate adds none: a session that will not run its stages keeps being
 blocked, and only the operator ends it (`LOADOUT_ENFORCE=0`, interrupt, or remove LOADOUT.md). That
-is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02. Cursor and Grok read Claude-format hooks but are unverified. Every
-other host keeps prose wiring; see `docs/host-capability-matrix.md`.
+is a deliberate cost: an unattended Codex loop can burn tokens until stopped. Proven live 2026-09-02.
+DeepSeek Harness: **off by default — pass `--enforce-dsh`.** Registration is machine-wide
+(`$DSH_HOME/cordis.patch.yml`, no per-repo plugin config). Default reapplication neither
+removes nor rewrites an existing entry. Skip registration this invocation by omitting
+the flag, or pass `--no-enforce`. Runtime hatch: `LOADOUT_ENFORCE=0`. An existing
+entry is left as-is; that is not a claim that enforcement is active or disabled.
+Cursor and Grok read Claude-format hooks but are unverified. Every
+other host skips registration this invocation; see `docs/host-capability-matrix.md`.
 
 Self-install, check and update from a source checkout:
 

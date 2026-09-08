@@ -30,6 +30,36 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 | Continue CLI | hard (undocumented) | undocumented | `~/.continue/sessions/*.json` | not started |
 | DeepSeek Harness | hard (`tools/pre-execute` returns `{kind:'deny',reason}`) | hard, but the PLUGIN enforces it (`agent.steer()`); every adapter failure path is fail-closed, proven by induced-error tests | native `skill` tool result marker + the plugin's live event stream | **proven** 2026-09-03 (gate_dsh, v1.6.0) — model scripted, see below |
 
+## What this repo implements, and what is tested here
+
+The table above is about what a host *can* do; this one is about what is built and exercised in
+this repository, which is a smaller set. They are independent: a `proven` row with no adapter is a
+research result, not a feature.
+
+| State | Meaning |
+|---|---|
+| implemented | `apply.py` registers the gate in that host's own config file |
+| source-only | mechanism read from that host's docs or source; nothing here registers it |
+| tested here | a test in `tests/` drives that adapter or dialect against a fixture |
+| unavailable | a test exists but skips on this machine or OS, so its result is not evidence here |
+| unsupported | no mechanism, or one this repo has decided not to use |
+
+| Host | Registration | Automated coverage here | Live proof |
+|---|---|---|---|
+| Claude Code | implemented, default (`apply.py:651`; `.claude/settings.local.json`) | tested here — `tests/test_gate.py` drives `gate.py` as a subprocess in both modes | proven 2026-09-02 |
+| Codex CLI | implemented, opt-in `--enforce-codex` (`apply.py:655`; `~/.codex/hooks.json`) | tested here — `tests/test_gate_codex.py` against rollout fixtures | proven 2026-09-02, headless `codex exec` |
+| DeepSeek Harness | implemented, opt-in `--enforce-dsh` (`apply.py:656`; `~/.dsh/cordis.patch.yml`) | tested here — `tests/test_gate_dsh.py` against payload-carried events; the node-dependent registration cases are **unavailable** on a machine with no node on PATH (`tests/test_apply.py:802`) | proven 2026-09-03, model scripted |
+| The other 11 `KNOWN_HOSTS` keys — cursor, gemini, opencode, crush, qwen, continue, copilot, grok, vibe, hermes, zcode | not implemented: `--host` is accepted and writes prose only, and no gate registration branch exists for them (`apply.py:628-637`, `651-656`) | no adapter to cover; the alias/normalisation path is tested | source-only, per the row above |
+| Any other name | unsupported: `resolve_host` raises rather than guessing (`apply.py:557-565`) | n/a | n/a |
+
+A name in `scan.py`'s `HOSTS` table, or a root the scanner discovers, is a scan and self-install
+target only. It means the machine has that directory — not that the gate can be registered there,
+and never that anything was proven. No host support is inferred from a name anywhere in this repo.
+
+Skips are `unavailable`, not passes: the symlink cases in `tests/test_apply.py` and
+`tests/test_scan.py` skip without Windows developer mode, and `tests/test_check_notes.py` skips its
+live-table case when no machine-local `references/skill-notes.md` has been generated.
+
 ## Per-host detail
 
 ### Claude Code (proven)
@@ -47,7 +77,25 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
 - Ledger: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl`; lines `session_meta`, `turn_context`, `event_msg`, `response_item`. Verified live: edits = `item_completed` FileChange, shell = CommandExecution (`parsed_cmd` reads), skill use = a parsed read of `<skills>/<name>/SKILL.md` only (a `$name` mention is not invocation), injected Stop-block reason = `HookPrompt` item. PreToolUse stdin is Claude-shaped (`Bash`, `apply_patch`); Stop stdin has no `transcript_path` (located by `session_id`). Hooks run through PowerShell here: `command_windows` uses the call operator. Codex has no block cap and the gate adds none on this host: blocking continues until the operator intervenes.
 - Proof (headless `codex exec`, 2026-09-02, re-run after the contract tightening): run 1, no skill read: 4 edit denials, 36 consecutive Stop blocks, never released, ended only when the 150 s external timeout killed it (exit 124), README untouched. Run 2, SKILL.md actually read: no denials, the edit applied, 4 Stop blocks until both binding stages' SKILL.md had been read, then a clean finish (exit 0).
 - Note: Codex does not surface hook stderr, so the gate's runaway note is invisible to the operator; repeated `hook: Stop Blocked` lines are the only signal. `hook: Stop Failed` lines in these runs come from an unrelated pre-existing Stop hook on the machine, not from the gate. Run 2 with `$planning-with-files`: skill read counted, edit allowed, Stop blocked with review missing until the review skill was read.
-- **Crash investigation, 2026-09-03 — the gate is not the cause.** A parallel session reported that a
+- **Pre-stage read primitive: UNQUALIFIED, 2026-09-06.** On the behaviour recorded for this host —
+  `tests/fixtures/codex-rollout.jsonl` and the current adapter — loading a skill *is* a shell read.
+  No capture of a host-native load exists, so that is the observed mechanism, not a claim about
+  every current Codex host. Every shell command except the exact validated `apply.py` bootstrap is
+  denied before stage 1, and the bootstrap cannot load a skill, so a session that already edited has
+  no in-session way to satisfy the stage. A pinned-spelling allowance (`cat '<path>'` /
+  `Get-Content -LiteralPath '<path>'` resolving to the pending stage's own SKILL.md) was tried and
+  **withdrawn**: independent execution ran that byte-identical command with a replacement `cat`
+  earlier on `PATH` and it was admitted, exited 0, printed an unrelated body and wrote an unrelated
+  file (`WORK_LOGS/LOADOUT_OC1_CX2_CODEX_EVIDENCE_2026_09_06/path-hijack-repro.txt`; reproduced as a
+  standing control in `tests/test_gate_codex_cx.py`). The gate sees command *text*; what that text
+  resolves to is the shell's decision, so no grammar over the text — and no `$`/`~` blacklist — makes
+  it a read. Bare `Get-Content` is unproven by the same argument (PowerShell resolves aliases and
+  functions ahead of cmdlets) and is not retained as a substitute. **Consequence: the Codex
+  prerequisite/recovery flow is PARTIAL.** The operator hatch is the only recovery, and the pre
+  denial now says so. What would qualify a primitive: observed host-native read behaviour whose
+  identity does not come from the command text — not a spelling, not a path suffix, and not an
+  executable discovered on a coordinating machine's `PATH`.
+- **Crash investigation, 2026-09-03 — no causal attribution established; cause unknown.** A parallel session reported that a
   registered gate crashed the Codex 0.152.1 desktop app-server (0xc0000409 about 20 s after launch)
   and made enforcement opt-in behind `--enforce-codex`. The crashes are real: Windows Error
   Reporting shows four `codex.exe` faults on 2026-09-02 (22:56 and 23:00 desktop app-server, 23:40
@@ -75,6 +123,57 @@ an adapter failure fails **closed**, or an explicit decision to accept the weake
   also openai/codex #38168: on Windows a hook command with embedded quotes can silently never run
   while still reporting `Completed` — a live enforcement-integrity trap, though a recorder probe
   confirmed the `&`-prefixed `commandWindows` form does execute on this machine.
+- **Trust-config preflight, and its interpreter boundary.** `trust_codex_gate` edits `config.toml`
+  textually (the stdlib has no TOML writer), so `apply --enforce-codex` validates an existing
+  `config.toml` *before* it writes anything at all — prose files included. A file Codex cannot parse
+  must not be appended to: the append reports trust granted while the hook stays untrusted forever.
+  Unreadable (non-UTF-8, permission-denied) is caught on every supported interpreter. Malformed
+  (`[broken`) needs a parser, and the stdlib only ships one from 3.11 (`tomllib`). None is
+  hand-rolled and no dependency is added, so where `tomllib` is absent the preflight **fails
+  closed**: on 3.9/3.10 `--enforce-codex` against an *existing* `config.toml` is refused outright —
+  valid-looking as well as malformed — with an actionable message naming the missing parser, exit 2
+  and empty results. An unvalidated config is never appended to. A genuinely absent `config.toml` is
+  still created there, and prose-only use (`--no-enforce`, or `--host codex` without
+  `--enforce-codex`) is unaffected on every supported version, so 3.9/3.10 core use stands.
+  The preflight also distinguishes a genuinely absent config from an existing target that cannot be
+  appended to: a directory, device, dangling symlink or symlink-to-directory at the config path is
+  rejected before any write (`exists()` alone would read a dangling link as absent). A symlink
+  resolving to a regular file stays supported. Absence is established rather than assumed: a
+  refused inspection can read as "genuinely absent" through the `pathlib` predicates, and whether it
+  does is interpreter- and route-dependent rather than universal. On 3.14.6 here, `is_file`,
+  `exists` and `is_symlink` delegate to `os.path`'s `nt._path_*` accelerators, which are documented
+  to answer `False` rather than raise for a path they cannot inspect — a refusal at `os.stat` never
+  reaches them. What was actually observed is narrower than that documented behaviour: under the
+  `os.stat`/`os.lstat`-only mock on 3.14.6, `is_file`/`exists`/`is_symlink` read `True`/`True`/`False`,
+  because the accelerators answered from the real file without ever consulting the refused call. That
+  is a result of the mock, not a measurement of what the accelerators return when they themselves
+  cannot inspect a path; no native inspection denial was run, so the `False` reading is reached here
+  only by the separate forced simulation described below. On 3.13.15 `is_file`/`exists` go through
+  `Path.stat()` -> `os.stat` and propagate the error instead, which the earlier preflight caught and
+  refused on. The old check was therefore safe on 3.13.15 on that refused-stat route only — and not
+  more broadly: the file-parent case (`<regular file>/config.toml`, which raises `FileNotFoundError`
+  exactly as a genuine miss does) was observed to defeat it on 3.13.15 as well as on 3.14.6. It is
+  also unsafe wherever the predicates answer `False`: there a stat the OS refuses and a path that can
+  never hold a file both read as absent, and the preflight returned success it had not earned. Byte-level,
+  against 7b11934 with that `False` reading forced for the config path only: `apply` returned
+  success and `config.toml` was *replaced* by a bare `[hooks.state]` — a foreign `[model]` table
+  gone at exit 0 — on 3.13.15 and 3.14.6 alike. It now probes with `os.lstat` and, when that fails,
+  decides on the nearest existing ancestor — a config under a regular file is refused (`its parent
+  is not a directory`), an unreadable stat is refused (`it cannot be inspected`), and only a real missing
+  path below a real directory is treated as creatable. `FileNotFoundError` alone is not evidence of
+  absence: Windows raises it for `<regular file>/config.toml` exactly as it does for a genuine miss,
+  which is why the ancestor, not the exception, is what decides. Absent-parent creation is unchanged
+  — missing directories are still created with the config. Residual limits: the check validates the
+  file as found, not the file as it will be after our append; the 3.9/3.10 branch is covered by
+  forcing `tomllib = None` on a 3.11+ interpreter, not by a real 3.9/3.10 run; the symlink cases are
+  skipped on Windows accounts without symlink-creation privilege, so they are unexercised here; and
+  the inspection-denial cases are mocked, not real. `os.stat`/`os.lstat` are refused for one path,
+  and the all-false predicate reading is *simulated* by forcing `is_file`/`exists`/`is_symlink` to
+  `False` for that same path: a simulation of the branch, not a native run on an interpreter
+  producing it from a real permission-denied file. On 3.14.6 the `os.stat` refusal alone does not
+  reach the predicates at all — hence the explicit simulation — while it does on 3.13.15. Only
+  3.13.15 and 3.14.6 were run; no other interpreter is claimed. TOCTOU between the preflight and the
+  write is not addressed.
 - Scope of the `proven` status: headless `codex exec`. The desktop app-server path was never
   exercised by these proofs and is not claimed.
 - Sources: https://learn.chatgpt.com/docs/hooks ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/events/pre_tool_use.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/src/schema.rs ; https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs ; https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json
@@ -168,6 +267,21 @@ Read from the installed tree, not from docs: `%LOCALAPPDATA%/Programs/DeepSeek H
   config** (a repo's `.dsh/` holds skills and AGENTS.md only) and **no trust gate on plugin load**;
   patch YAML permits `!!js` expressions. The enforcement surface on this host therefore has to
   include `cordis.patch.yml`, the profile `package.json` and `settings.yaml`.
+- **Interpreter — differs, and has to be pinned.** The plugin is JavaScript and the policy is
+  Python, so every decision costs a `spawnSync` of an interpreter — and on this host a spawn that
+  fails is not a degraded check, it is a total deny (fail closed). Two hazards follow. Existence is
+  not usability: a `which` hit, a Microsoft Store alias or a `python.cmd` launcher all resolve and
+  then fail at spawn, so `apply` runs the candidate (bounded, headless) and keeps the `sys.executable`
+  it reports rather than the name it was reached by. And the two sides must agree: `apply` writes the
+  validated executable into the registration entry as `config.python`, which dsh hands to the
+  plugin's `apply(ctx, config)` — the same per-entry `config` the proof overlay uses on its
+  `- id: settings` entry. `LOADOUT_PYTHON`, when set, is the choice and is never replaced by another
+  interpreter; an unusable one is reported as an error naming it. A registration written by hand pins
+  nothing, so the plugin falls back to probing `python` then `python3` itself, in `apply`'s order.
+  Windows detail that drives the design: Node's `spawnSync` refuses a `.cmd`/`.bat` (EINVAL, observed
+  on Node 24.18.0) and does not PATHEXT-resolve one from PATH, so a launcher is never what gets
+  pinned — only a real executable is. Not covered: a pinned interpreter that stops working between
+  `apply` and the session, and any platform other than this Windows host.
 - **Language — meets the contract via a wrapper.** A plugin is an in-process ESM module
   (`apply(ctx, config)`); there is no external-process hook runner (`hook/invoked` and `hook/result`
   are reserved session-event names with zero producers). But `tools/pre-execute` is an awaited async

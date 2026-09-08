@@ -5,10 +5,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "scripts" / "gate.py"
 sys.path.insert(0, str(REPO / "scripts"))
 import gate  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_hatch(monkeypatch):
+    """A test that calls gate.decide() in-process reads this process's environment, so an operator
+    hatch set in the shell that launched pytest would silently turn enforcement off underneath it
+    and the test would assert against a bypassed gate. run_gate() already strips it for the
+    subprocess path; this covers the direct one. The hatch itself is still proved explicitly, by
+    passing LOADOUT_ENFORCE=0 to a subprocess in test_silent_allow_without_loadout_or_with_hatch."""
+    monkeypatch.delenv("LOADOUT_ENFORCE", raising=False)
 
 
 def test_write_shaped_bash_commands():
@@ -27,6 +39,20 @@ def test_write_shaped_bash_commands():
     assert not gate.write_shaped("cmd > /dev/null")
     assert not gate.write_shaped("cmd >/dev/null 2>&1")
     assert not gate.write_shaped("git status --short")
+
+
+def test_mcp_action_tokens_not_substring_run():
+    assert not gate.is_edit_tool("mcp__github__list_workflow_runs")
+    assert not gate.is_edit_tool("mcp__x__runner_status")
+    assert gate.is_edit_tool("mcp__github__run_workflow")
+    assert gate.is_edit_tool("mcp__fs__write_file")
+    assert gate.is_edit_tool("mcp__x__create_issue")
+    assert not gate.is_edit_tool("mcp__fs__read_file")
+    # the mutating word sits in the middle of both configured Composio executors, so no
+    # first-/last-word rule can classify them
+    assert gate.is_edit_tool("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL")
+    assert gate.is_edit_tool("mcp__composio__COMPOSIO_REMOTE_BASH_TOOL")
+    assert not gate.is_edit_tool("mcp__composio__COMPOSIO_GET_TOOL_SCHEMAS")
 
 
 def transcript(tmp_path, blocks, name="t.jsonl", cwd=None):
@@ -88,7 +114,23 @@ LOADOUT = ("# Loadout: x\nHarness: claude-code | Project type: cli\nDate: 2026-0
            "- situational, gated work: `unlazy`\n")
 
 
+def assert_no_inherited_policy(root):
+    """Fail loudly if a LOADOUT.md above the fixture would govern it.
+
+    `find_loadout` walks to the filesystem root by design, and that is production behaviour worth
+    keeping: a project's policy usually sits above the file being edited. The cost is that a
+    policy anywhere above the basetemp -- this repo's own LOADOUT.md, if someone points
+    `--basetemp` inside the tree -- silently governs every fixture built here, turning a "no
+    policy, so allow" case into a deny for a reason nothing in the test names. The fixture
+    asserts its own ground instead of narrowing the walk-up."""
+    inherited = gate.find_loadout(root)
+    assert inherited is None, (
+        f"fixture root {root} inherits {inherited}; run pytest with --basetemp outside any tree "
+        "carrying a LOADOUT.md. The walk-up is production behaviour, not the bug.")
+
+
 def project(tmp_path, loadout=LOADOUT):
+    assert_no_inherited_policy(tmp_path)  # before writing this fixture's own policy
     proj = tmp_path / "proj" / "sub"
     proj.mkdir(parents=True)
     if loadout is not None:
@@ -126,6 +168,52 @@ def test_find_loadout_walks_up(tmp_path):
     proj = project(tmp_path)
     assert gate.find_loadout(proj) == tmp_path / "proj" / "LOADOUT.md"
     assert gate.find_loadout(tmp_path) is None
+
+
+def test_fixture_isolation_guard_is_not_vacuous(tmp_path):
+    """The guard every fixture runs has to be able to fail, and the walk-up it guards against has
+    to still work: same mechanism, one accidental and one deliberate."""
+    root = tmp_path / "clean"
+    root.mkdir()
+    assert_no_inherited_policy(root)                    # ordinary fixture ground: nothing above it
+    assert gate.find_loadout(root) is None
+
+    outer = tmp_path / "inherited"
+    inner = outer / "proj"
+    inner.mkdir(parents=True)
+    (outer / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
+    import pytest
+    with pytest.raises(AssertionError, match="inherits"):
+        assert_no_inherited_policy(inner)               # the same planted file the guard exists for
+    assert gate.find_loadout(inner) == outer / "LOADOUT.md", "production walk-up is unchanged"
+
+
+def test_nearest_policy_governs_and_the_walk_up_skips_directories_without_one(tmp_path):
+    """Two policies on one path: the nearest governs, and its stage 1 -- not the outer one's -- is
+    what the hook demands. Remove it and the outer policy governs from the same directory, so the
+    walk-up is still crossing the intermediate directory that has no LOADOUT.md of its own."""
+    assert_no_inherited_policy(tmp_path)
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    deep = inner / "a" / "b"                            # no LOADOUT.md of their own
+    deep.mkdir(parents=True)
+    (outer / "LOADOUT.md").write_bytes(
+        b"# Loadout: outer\n\n## Accepted\n- planning: `outerplanner`\n")
+    (inner / "LOADOUT.md").write_bytes(LOADOUT.encode("utf-8"))
+    t = transcript(tmp_path, [])
+
+    reason = run_gate("pre", pre_hook(deep, t))["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`planner`" in reason and "outerplanner" not in reason
+    assert gate.find_loadout(deep) == inner / "LOADOUT.md"
+
+    (inner / "LOADOUT.md").unlink()
+    reason = run_gate("pre", pre_hook(deep, t))["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`outerplanner`" in reason
+    assert gate.find_loadout(deep) == outer / "LOADOUT.md"
+
+    # and the stage that governs is the one the governing file names: invoking it releases the edit
+    after = transcript(tmp_path, [[skill("outerplanner")]], name="after.jsonl")
+    assert run_gate("pre", pre_hook(deep, after)) is None
 
 
 def test_pre_denies_edit_before_stage_one_and_allows_after(tmp_path):
@@ -216,9 +304,17 @@ def test_bootstrap_boundary_is_exact_not_blanket(tmp_path):
 def test_bootstrap_invocation_predicate():
     A = str(REPO / "scripts" / "apply.py")
     assert gate.bootstrap_invocation(f'python "{A}" . --host claude-code')
+    assert gate.bootstrap_invocation(f'python "{A}" . --host claude-code --enforce-codex')
+    assert gate.bootstrap_invocation(f'python "{A}" . --host dsh --enforce-dsh')
+    assert gate.bootstrap_invocation(f'python3 "{A}" /p --loadout L.md --no-enforce')
     assert not gate.bootstrap_invocation(f'python "{A}" . | tee log')
     assert not gate.bootstrap_invocation(f'python "{A}" . $(id)')
     assert not gate.bootstrap_invocation(f'python "{A}" . `id`')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host --no-enforce')
+    assert not gate.bootstrap_invocation(f'python "{A}" . --host claude-code --evil')
+    assert not gate.bootstrap_invocation(f'python "{A}" . extra')
+    assert not gate.bootstrap_invocation(f'python x/apply.py . --host claude-code')
 
 
 def test_slash_command_counts_as_invoked(tmp_path):
@@ -269,6 +365,35 @@ def test_stop_blocks_only_after_edits_and_names_missing_stages(tmp_path):
     assert "unlazy" not in out["reason"], "situational stages are not binding"
     t = transcript(tmp_path, [[skill("planner")], [skill("reviewer")], [tool("Edit", file_path="a.py")]])
     assert run_gate("stop", stop_hook(proj, t)) is None
+
+
+def test_list_workflow_runs_does_not_arm_stop(tmp_path):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[skill("planner")],
+                              [tool("mcp__github__list_workflow_runs")]])
+    assert gate.transcript_facts(t).edited is False
+    assert run_gate("stop", stop_hook(proj, t)) is None
+    t = transcript(tmp_path, [[skill("planner")],
+                              [tool("mcp__github__run_workflow")]])
+    assert gate.transcript_facts(t).edited is True
+    out = run_gate("stop", stop_hook(proj, t))
+    assert out and out["decision"] == "block"
+
+
+def test_unreadable_policy_warns_and_keeps_host_semantics(tmp_path, monkeypatch, capsys):
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [[tool("Edit", file_path="a.py")]])
+    orig = Path.read_text
+
+    def boom(self, *a, **k):
+        if self.name == "LOADOUT.md":
+            raise OSError("denied")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert gate.decide("pre", pre_hook(proj, t)) is None
+    err = capsys.readouterr().err
+    assert "unreadable policy" in err and "LOADOUT.md" in err
 
 
 def test_silent_allow_without_loadout_or_with_hatch(tmp_path):

@@ -156,3 +156,25 @@ def test_mcp_and_worktree_tools_are_gated_by_name(tmp_path):
     assert denied(pre_hook(proj, t, "mcp__composio__COMPOSIO_REMOTE_BASH_TOOL", command="ls"))
     assert run_gate("pre", pre_hook(proj, t, "mcp__context7__query-docs", q="x")) is None
     assert run_gate("pre", pre_hook(proj, t, "Read", file_path="a")) is None
+
+
+def test_configured_composio_executors_are_gated_and_its_read_tools_are_not(tmp_path):
+    """The configured Composio fleet, classified by name through the real hook subprocess.
+    MULTI_EXECUTE dispatches arbitrary tool slugs -- the examples in its own schema are
+    GMAIL_SEND_EMAIL, SLACK_SEND_MESSAGE, GITHUB_CREATE_AN_ISSUE -- so it mutates exactly as much
+    as REMOTE_BASH does, and both carry their mutating word in the middle of the name."""
+    proj = project(tmp_path)
+    t = transcript(tmp_path, [])
+    mutating = [("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL",
+                 {"tools": [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}]}),
+                ("mcp__composio__COMPOSIO_REMOTE_BASH_TOOL", {"command": "ls"}),
+                ("mcp__composio__COMPOSIO_REMOTE_WORKBENCH", {"code_to_execute": "1"})]
+    for name, inp in mutating:
+        out = run_gate("pre", pre_hook(proj, t, name, **inp))
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", f"{name} was not denied"
+    benign = [("mcp__composio__COMPOSIO_SEARCH_TOOLS", {"queries": [{"use_case": "x"}]}),
+              ("mcp__composio__COMPOSIO_GET_TOOL_SCHEMAS", {"tool_slugs": ["GMAIL_SEND_EMAIL"]}),
+              ("mcp__github__list_workflow_runs", {"repo": "x"}),
+              ("mcp__x__runner_status", {"id": "1"})]
+    for name, inp in benign:
+        assert run_gate("pre", pre_hook(proj, t, name, **inp)) is None, name

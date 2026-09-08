@@ -22,14 +22,16 @@ SCRUB = ["LOADOUT_HOST", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "VIBE_H
          "HERMES_HOME", "DSH_HOME", "XDG_CONFIG_HOME"] + [v for v, _ in scan.ENV_MARKERS]
 
 
-def run_scan(home, args, env=None, host="claude-code"):
+def run_scan(home, args, env=None, host="claude-code", cwd=None):
     e = {k: v for k, v in os.environ.items() if k not in SCRUB}
     e.update(USERPROFILE=str(home), HOME=str(home))
     if host:
         e["LOADOUT_HOST"] = host
     e.update(env or {})
+    # `cwd` matters only where a configured root is RELATIVE - a relative XDG_CONFIG_HOME is the
+    # one shipped way an extra skills root resolves against the working directory rather than home.
     return subprocess.run([sys.executable, str(SCAN), *args], capture_output=True,
-                          encoding="utf-8", env=e)
+                          encoding="utf-8", env=e, cwd=None if cwd is None else str(cwd))
 
 
 def scan_json(home, proj, extra=()):
@@ -236,6 +238,31 @@ def test_shared_pool_credited_to_readers_not_claude(tmp_path):
     assert "shared ~/.agents pool of 2 credited to" in run_scan(h, [str(proj)]).stdout
 
 
+def test_only_here_is_this_host_minus_every_other(tmp_path):
+    """`missing_here` is covered above; this pins the other direction of the same subtraction.
+    `only_here` is the running host's skills minus the union of the others, so it moves when
+    either side moves and it is not a property of the name."""
+    h, proj = make_fixture(tmp_path)
+    write(h / ".claude/skills/claudeonly/SKILL.md", "---\ndescription: only claude has this\n---\n")
+    ch = scan_json(h, proj)["cross_host"]
+    assert "claudeonly" in ch["only_here"]
+    assert "plainskill" not in ch["only_here"], "a name every host carries is universal, not only here"
+    assert set(ch["only_here"]) == {"bigmeta", "bundlekit:pipeline", "bundlekit:verify",
+                                    "claudeonly", "foldedskill", "longskill", "multiline",
+                                    "offskill", "unicodeskill"}
+
+    # one copy in one other host takes it out, in the JSON and in the rendered line
+    write(h / ".zcode/skills/claudeonly/SKILL.md", "---\ndescription: now shared\n---\n")
+    ch = scan_json(h, proj)["cross_host"]
+    assert "claudeonly" not in ch["only_here"]
+    line = run_scan(h, [str(proj)]).stdout.split("- only in this host (")[1].split("\n")[0]
+    assert line.startswith("8):") and "claudeonly" not in line
+
+    # and it is the running host's own set, not claude's: from deepseek only its own skill qualifies
+    ds = json.loads(run_scan(h, ["--json", str(proj)], host="dsh").stdout)["cross_host"]
+    assert ds["only_here"] == ["dshskill"]
+
+
 def test_discovered_roots_and_brief(tmp_path):
     h, proj = make_fixture(tmp_path)
     inv = scan_json(h, proj)
@@ -247,6 +274,90 @@ def test_discovered_roots_and_brief(tmp_path):
     assert "## claude-code" in brief and "### skills" in brief
     assert "## codex" not in brief
     assert ".someagent (1)" in brief
+
+
+def collision_fixture(tmp_path):
+    """A home and a working directory that make two DISTINCT roots display the same legacy name.
+
+    `XDG_CONFIG_HOME=.config` is relative, so the shipped extra root `$XDG_CONFIG_HOME/agents/skills`
+    resolves against the working directory while dynamic discovery finds `~/.config/agents` under
+    home. Two different directories, and the old home-relative label spelled both `.config/agents`,
+    so whichever was found second replaced the first in the inventory, in `--hosts` and in the
+    audit that reads them."""
+    h, proj = make_fixture(tmp_path)
+    cwd = tmp_path / "cwd"
+    write(h / ".config/agents/skills/homeskill/SKILL.md", "---\ndescription: under home\n---\n")
+    write(cwd / ".config/agents/skills/cwdskill/SKILL.md", "---\ndescription: under cwd\n---\n")
+    return h, proj, cwd, {"XDG_CONFIG_HOME": ".config"}
+
+
+def discovered_at(inv, base):
+    return {k: v for k, v in inv["hosts"].items()
+            if v.get("discovered") and k.split("#")[0] == base}
+
+
+def test_two_roots_with_one_display_name_both_reach_the_inventory_and_selection(tmp_path):
+    """DISC1.2 at the production boundary. Both roots must appear, under names that are still
+    valid `--hosts` selectors, and each must carry its OWN skills.
+
+    The two roots are compared as ONE mapping, so an exchange of skill lists between them is a
+    different value rather than the same two sets. The cwd root is pinned in the RAW relative
+    spelling the scanner emits - a relative `XDG_CONFIG_HOME` is kept relative on purpose, and
+    nothing here rebases it against the child's working directory, so an accidental
+    absolutisation in production would be a different value too and could not pass."""
+    h, proj, cwd, env = collision_fixture(tmp_path)
+    inv = json.loads(run_scan(h, ["--json", str(proj)], env=env, cwd=cwd).stdout)
+
+    got = discovered_at(inv, ".config/agents")
+    assert len(got) == 2, got
+    assert {Path(v["root"]): tuple(e["name"] for e in v["assets"]["skills"])
+            for v in got.values()} == \
+        {h / ".config/agents": ("homeskill",),
+         Path(".config/agents"): ("cwdskill",)}, "a root kept the other root's skills"
+    # the ordinary labels of the same run are untouched
+    assert inv["hosts"][".someagent"]["discovered"] is True
+    assert inv["hosts"][".pi/agent"]["discovered"] is True
+
+    for label, rec in got.items():
+        r = run_scan(h, ["--check", "--hosts", label], env=env, cwd=cwd)
+        assert r.returncode == 1, (label, r.stdout, r.stderr)
+        assert f"- {label}: not installed" in r.stdout, (label, r.stdout)
+        assert str(Path(rec["root"]) / "skills") in r.stdout, (label, r.stdout)
+
+
+def test_self_install_discovery_and_the_unknown_host_list_carry_the_same_names(tmp_path):
+    """The self-install known set is the third producer, and `--hosts all` is where its discovery
+    reaches install targets. A discovered name was already ACCEPTED as a selector; what the
+    unknown-host diagnostic omitted was any sign those alternatives existed, so an operator who
+    mistyped one was left with only the fixed table to correct against.
+
+    The two discovered records and their roots are pinned BEFORE the loops below: a run that
+    discovered nothing would satisfy every `for label in labels` body vacuously, and a run that
+    discovered one would still be missing the second root this fixture exists to produce."""
+    h, proj, cwd, env = collision_fixture(tmp_path)
+    inv = json.loads(run_scan(h, ["--json", str(proj)], env=env, cwd=cwd).stdout)
+    got = discovered_at(inv, ".config/agents")
+    assert {Path(v["root"]) for v in got.values()} == \
+        {h / ".config/agents", Path(".config/agents")}, got
+    assert len(got) == 2, got
+    labels = sorted(got)
+
+    r = run_scan(h, ["--check", "--hosts", "all"], env=env, cwd=cwd)
+    assert r.returncode == 1, r.stderr
+    for label in labels:
+        assert f"- {label}: not installed" in r.stdout, (label, r.stdout)
+    assert "- claude-code: " in r.stdout, "a fixed host was displaced by a discovered name"
+
+    r = run_scan(h, ["--check", "--hosts", "bogus"], env=env, cwd=cwd)
+    assert r.returncode == 2
+    assert "unknown host(s): bogus" in r.stderr
+    assert "claude-code" in r.stderr
+    for label in labels:
+        assert label in r.stderr, (label, r.stderr)
+    # The GENERATED suffix carries no comma, which is what this checks: these two bases are
+    # comma-free, so no universal guarantee follows from it. An ordinary base that contains a
+    # comma is still split by the unchanged `--hosts` grammar.
+    assert "," not in "".join(labels), "a generated label must stay one token in a comma list"
 
 
 def test_deepseek_harness_is_a_first_class_host(tmp_path):
@@ -312,6 +423,17 @@ def test_nonexistent_project_dir_fails(tmp_path):
     assert r.returncode == 2 and "project dir not found" in r.stderr
 
 
+def test_scan_help_is_usage_not_inventory(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    r = run_scan(h, ["--help", str(proj)])
+    assert r.returncode == 0, r.stderr
+    assert "Usage:" in r.stdout
+    assert "python scan.py" in r.stdout
+    assert "Running inside" not in r.stdout
+    assert len(r.stdout) < 2000
+    assert "Traceback" not in r.stderr
+
+
 def test_prior_loadout_detected_for_reaudit(tmp_path):
     h, proj = make_fixture(tmp_path)
     write(proj / "LOADOUT.md", "# Loadout: x\nHarness: claude-code\nDate: 2026-08-31\n\n## Accepted\n- plan: `p`\n")
@@ -356,6 +478,121 @@ def test_self_install_check_and_host_opt_in(tmp_path):
     assert r.returncode == 0 and (h / ".someagent/skills/loadout/SKILL.md").is_file()
     r = run_scan(h, ["--self-install", "--hosts", "bogus"])
     assert r.returncode == 2 and "unknown host(s): bogus" in r.stderr
+
+
+def test_scan_unknown_or_valueless_flags_exit_2_without_dispatch(tmp_path):
+    h, proj = make_fixture(tmp_path)
+    r = run_scan(h, ["--self-install", "--hosts"])
+    assert r.returncode == 2, r.stdout
+    assert "Usage:" in r.stderr or "needs a value" in r.stderr or "scan:" in r.stderr
+    assert "Traceback" not in r.stderr
+    assert not (h / ".claude/skills/loadout").exists()
+    r = run_scan(h, ["--bogus", str(proj)])
+    assert r.returncode == 2
+    assert "Usage:" in r.stderr or "unknown" in r.stderr or "scan:" in r.stderr
+    assert "Harness Inventory" not in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_scan_blank_hosts_and_dash_tokens_exit_2_without_installing(tmp_path):
+    """A blank --hosts list, and any stray dash token, used to fall through as "no --hosts given"
+    and self-install into every default host present in the home."""
+    cases = ((["--self-install", "--hosts", ""], "at least one host"),
+             (["--self-install", "--hosts", " , "], "at least one host"),
+             (["--self-install", "-x"], "unknown option"))
+    for n, (args, want) in enumerate(cases):
+        h, _ = make_fixture(tmp_path / str(n))
+        r = run_scan(h, args)
+        assert r.returncode == 2, (args, r.stdout)
+        assert "Traceback" not in r.stderr
+        assert want in r.stderr, (args, r.stderr)
+        assert not list(h.glob("*/skills/loadout/SKILL.md")), args
+
+
+def test_scan_rejects_extra_positionals_and_install_mode_paths(tmp_path):
+    """Documented usage is one optional [project_dir] for a scan and none for --check/--self-install.
+    Taking args[0] and dropping the rest read `--self-install <dir>` as a whole-home install of a
+    skill the caller thought they were scoping, and read a mistyped second path as a narrower scan."""
+    h, proj = make_fixture(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    cases = ((["--self-install", str(proj)], "takes no project directory"),
+             (["--check", str(proj)], "takes no project directory"),
+             (["--self-install", "--hosts", "codex", str(proj)], "takes no project directory"),
+             ([str(proj), str(other)], "expected one project directory, got 2"),
+             (["--json", str(proj), str(other)], "expected one project directory, got 2"))
+    for args, want in cases:
+        r = run_scan(h, args)
+        assert r.returncode == 2, (args, r.stdout)
+        assert want in r.stderr, (args, r.stderr)
+        assert "Traceback" not in r.stderr, args
+        assert "Harness Inventory" not in r.stdout, args  # the scan did not run either
+        assert not list(h.glob("*/skills/loadout/SKILL.md")), args
+
+    # the documented forms still work, in the home those rejections left untouched
+    r = run_scan(h, ["--brief", str(proj)])
+    assert r.returncode == 0 and "Harness Inventory" in r.stdout, r.stderr
+    spaced = tmp_path / "a project"  # the one positional is a literal path, not a token to re-split
+    spaced.mkdir()
+    assert run_scan(h, ["--json", str(spaced)]).returncode == 0
+    r = run_scan(h, ["--self-install", "--hosts", "codex"])
+    assert r.returncode == 0 and "codex: " in r.stdout, r.stderr
+    assert (h / ".codex/skills/loadout/SKILL.md").is_file()
+
+
+# The exact one-liner SKILL.md tells the reader to run; the test below pins the two together.
+NAMES_ONE_LINER = ("import json,sys;i=json.load(open(sys.argv[1]));"
+                   "print(*sorted({s['name'] for h in i['hosts'].values() "
+                   "for s in h['assets'].get('skills',[])}),sep=chr(10))")
+
+MINIMAL_NOTES = """# Skill notes
+
+## Skills
+
+| skill | category | does | overlap | tier | upstream |
+|---|---|---|---|---|---|
+{rows}
+"""
+
+
+def test_documented_installed_names_recipe_feeds_check_notes(tmp_path):
+    """SKILL.md tells the reader to build check_notes' `--installed` list from the scanner rather
+    than by hand. This runs an equivalent subprocess pipeline against the synthetic home, so the
+    instructions' logic stays runnable: the one-liner is pinned verbatim, but the interpreter is
+    `sys.executable` rather than a `python3` on PATH, both documented `>` redirects are captured
+    stdout written here, and command 3 is given an explicit notes path. Literal shell redirection,
+    PATH `python3` and check_notes' default notes lookup are therefore not exercised. No real home
+    and no installed copy is read or written."""
+    assert NAMES_ONE_LINER in (REPO / "SKILL.md").read_text(encoding="utf-8"), \
+        "SKILL.md's recipe and this test have drifted apart"
+    h, proj = make_fixture(tmp_path)
+
+    r = run_scan(h, ["--json", str(proj)])          # documented command 1, stdout captured here
+    assert r.returncode == 0, r.stderr
+    inv = tmp_path / "inv.json"
+    inv.write_text(r.stdout, encoding="utf-8")
+
+    r = subprocess.run([sys.executable, "-c", NAMES_ONE_LINER, str(inv)],   # command 2, this interpreter
+                       capture_output=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
+    installed = tmp_path / "installed.txt"
+    installed.write_text(r.stdout, encoding="utf-8")
+    names = [n for n in r.stdout.splitlines() if n.strip()]
+    assert "plainskill" in names and "dshskill" in names, names
+    assert "askill" not in names, "plugin-provided skills are a separate section, as documented"
+
+    def check(rows):                                # command 3, with an explicit notes path
+        notes = tmp_path / "skill-notes.md"
+        notes.write_text(MINIMAL_NOTES.format(rows="\n".join(
+            f"| {n} | other | Does a thing | - | broad | - |" for n in rows)), encoding="utf-8")
+        return subprocess.run([sys.executable, str(REPO / "scripts" / "check_notes.py"),
+                               str(notes), "--installed", str(installed)],
+                              capture_output=True, encoding="utf-8")
+
+    r = check(names)
+    assert r.returncode == 0, r.stdout
+    r = check([n for n in names if n != "dshskill"])
+    assert r.returncode == 1 and "dshskill: installed but has no row" in r.stdout, r.stdout
 
 
 def test_loadout_host_override_is_normalised_to_a_host_key(tmp_path):
@@ -471,3 +708,55 @@ def test_foreign_host_hooks_are_collapsed_with_counts(tmp_path):
     out = run_scan(h, [str(proj)], host="codex").stdout  # claude-code is now a foreign host
     assert "- hooks: PostToolUse, SessionStart ×3\n" in out
     assert "SessionStart, SessionStart" not in out
+
+
+def test_short_cmd_masks_secret_shaped_flags_and_env_assignments():
+    """Best-effort masking of secret-shaped flags/env, not an escape-proof guarantee.
+    Positional secrets and arbitrary names stay visible; command identity stays intact."""
+    assert "supersecretTOKEN123" not in scan.short_cmd("--token supersecretTOKEN123")
+    assert scan.short_cmd("--token supersecretTOKEN123").startswith("--token")
+    assert "sekrit" not in scan.short_cmd("--api-key=sekrit")
+    assert "sekrit" not in scan.short_cmd("--password 'sekrit with spaces'")
+    assert "sekrit" not in scan.short_cmd("FOO_TOKEN=sekrit python apply.py")
+    assert "sekrit" not in scan.short_cmd('AUTH_KEY="sekrit"')
+    assert "sekrit" not in scan.short_cmd("API_KEY=sekrit")
+    for bare in ("TOKEN", "SECRET", "PASSWORD"):
+        out = scan.short_cmd(f"{bare}=sekrit python apply.py")
+        assert "sekrit" not in out, bare
+        assert "python apply.py" in out, bare
+        assert out.startswith(f"{bare}=")
+    benign = scan.short_cmd('python apply.py --host claude-code --loadout LOADOUT.md')
+    assert "python apply.py" in benign and "claude-code" in benign and "LOADOUT.md" in benign
+    assert "visible-arg" in scan.short_cmd("echo visible-arg")
+    keep = scan.short_cmd("TOKENIZER=keepme python apply.py")
+    assert "keepme" in keep and "python apply.py" in keep
+
+
+def test_short_cmd_stops_unquoted_env_value_at_shell_separator():
+    """Unquoted values end at ;|& or whitespace. Not a shell parser."""
+    out = scan.short_cmd("export FOO_TOKEN=synthetic;python hook.py")
+    assert "synthetic" not in out
+    assert ";python hook.py" in out
+    assert "FOO_TOKEN=" in out
+    assert "python hook.py" in scan.short_cmd("FOO_TOKEN=synthetic python hook.py")
+
+
+def test_hooks_from_data_and_markdown_mask_secret_shaped_commands(tmp_path):
+    """The scan listing path (hooks_from_data → inventory → markdown) must not leak
+    secret-shaped flag/env values from registered hook commands."""
+    h, proj = make_fixture(tmp_path)
+    settings = json.loads((h / ".claude/settings.json").read_text(encoding="utf-8"))
+    settings["hooks"]["PreToolUse"] = [{"hooks": [{
+        "type": "command",
+        "command": "export FOO_TOKEN=synthetic;python hook.py --token supersecretTOKEN123"}]}]
+    write(h / ".claude/settings.json", json.dumps(settings))
+    rows = scan.hooks_from_data(settings, "settings.json")
+    blob = json.dumps(rows)
+    assert "synthetic" not in blob and "supersecretTOKEN123" not in blob
+    assert any("python hook.py" in r["desc"] and "--token" in r["desc"] for r in rows)
+    inv = scan_json(h, proj)
+    dumped = json.dumps(inv)
+    assert "synthetic" not in dumped and "supersecretTOKEN123" not in dumped
+    md = run_scan(h, [str(proj)]).stdout
+    assert "synthetic" not in md and "supersecretTOKEN123" not in md
+    assert "python hook.py" in md and "--token" in md

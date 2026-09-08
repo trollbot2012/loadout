@@ -19,7 +19,7 @@ def rollout(tmp_path, lines, name="rollout-x.jsonl"):
     return p
 
 
-def meta(cwd="C:\proj"):
+def meta(cwd=r"C:\proj"):
     return {"type": "session_meta", "payload": {"id": "s1", "cwd": cwd}}
 
 
@@ -37,10 +37,13 @@ def command(cmd):
 
 
 def skill_read(name):
-    """A CommandExecution whose parsed_cmd reads <skills root>/<name>/SKILL.md: the only invocation signal on Codex."""
+    """A *successful* CommandExecution whose parsed_cmd reads <skills root>/<name>/SKILL.md: the only
+    invocation signal on Codex. The outcome is explicit because only a load the record says succeeded
+    earns credit; the recorded rollout spells success as status="completed" with exit_code=0."""
     path = f"C:/u/.agents/skills/{name}/SKILL.md"
     return item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", f"Get-Content -Raw '{path}'"],
-                 "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": path}]})
+                 "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": path}],
+                 "status": "completed", "exit_code": 0})
 
 
 def exec_call(js):
@@ -71,7 +74,7 @@ def test_write_shaped_command_is_an_edit(tmp_path):
 def test_read_only_command_is_not_an_edit(tmp_path):
     p = rollout(tmp_path, [meta(), command("git status --short")])
     f = gate_codex.transcript_facts(p)
-    assert f.edited is False and f.cwd == "C:\proj"
+    assert f.edited is False and f.cwd == r"C:\proj"
 
 
 def test_exec_fallback_apply_patch_and_exec_command(tmp_path):
@@ -221,17 +224,45 @@ def test_codex_stop_without_transcript_path_finds_the_rollout_by_session_id(tmp_
     assert gate_codex.find_rollout("no-such-session", home) is None
 
 
+def read_item(path, **outcome):
+    it = {"type": "CommandExecution", "command": ["pwsh.exe", "-Command", f"Get-Content -Raw '{path}'"],
+          "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": path}]}
+    it.update(outcome)
+    return item(it)
+
+
+SKILL_PATH = "C:/u/.agents/skills/loadout/SKILL.md"
+
+
 def test_reading_a_skill_file_counts_as_invoking_it(tmp_path):
     # recorded live: Codex has no skill event; the agent reads <skills root>/<name>/SKILL.md via a shell read
-    read = item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", "Get-Content -Raw 'C:/u/.agents/skills/loadout/SKILL.md'"],
-                 "cwd": "file:///C:/proj", "parsed_cmd": [{"type": "read", "cmd": "x", "name": "SKILL.md", "path": "C:/u/.agents/skills/loadout/SKILL.md"}],
-                 "status": "failed"})
+    read = read_item(SKILL_PATH, status="completed", exit_code=0)
     t = rollout(tmp_path, [meta(), user("go"), read])
     facts = gate_codex.transcript_facts(t)
     assert facts.invoked == {"loadout"} and facts.edited is False
     other = item({"type": "CommandExecution", "command": ["pwsh.exe", "-Command", "cat README.md"], "cwd": "file:///C:/proj",
-                  "parsed_cmd": [{"type": "read", "cmd": "cat README.md", "name": "README.md", "path": "C:/proj/README.md"}]})
+                  "parsed_cmd": [{"type": "read", "cmd": "cat README.md", "name": "README.md", "path": "C:/proj/README.md"}],
+                  "status": "completed", "exit_code": 0})
     assert gate_codex.transcript_facts(rollout(tmp_path, [meta(), other])).invoked == set()
+
+
+def test_only_a_read_the_record_says_succeeded_counts_as_invoking_it(tmp_path):
+    """Correction to the original fixture, which carried status="failed" and still asserted the
+    credit. Q3 requires that a denied or failed read cannot earn completed-load credit, and the
+    recorded rollout (tests/fixtures/codex-rollout.jsonl) supplies the vocabulary: "completed"
+    with exit_code 0, "failed" with exit_code 1. Everything that does not positively say success
+    -- absent, null, unknown, wrong-typed, or contradicted by the exit code -- earns nothing."""
+    credited = [{"status": "completed", "exit_code": 0}, {"status": "completed"}]
+    withheld = [{"status": "failed", "exit_code": 1}, {"status": "failed"}, {},
+                {"status": None}, {"status": "in_progress"},
+                {"status": "completed", "exit_code": 1}, {"status": "completed", "exit_code": None},
+                {"status": "completed", "exit_code": "0"}]
+    for outcome in credited:
+        t = rollout(tmp_path, [meta(), read_item(SKILL_PATH, **outcome)])
+        assert gate_codex.transcript_facts(t).invoked == {"loadout"}, f"must credit: {outcome}"
+    for outcome in withheld:
+        t = rollout(tmp_path, [meta(), read_item(SKILL_PATH, **outcome)])
+        assert gate_codex.transcript_facts(t).invoked == set(), f"must not credit: {outcome}"
 
 
 def hook_prompt(text):

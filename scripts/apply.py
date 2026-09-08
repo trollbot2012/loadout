@@ -2,6 +2,7 @@
 """loadout apply — persist the accepted loadout into the project's agent instruction files, idempotently.
 
 Usage: python apply.py <project_dir> --host <host> [--loadout LOADOUT.md] [--no-enforce]
+       [--enforce-codex] [--enforce-dsh]
 
 Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'), builds the
 '## Loadout' block and upserts it (replace if present, else append, else create) into:
@@ -16,31 +17,126 @@ Reads the '## Accepted' section of LOADOUT.md (lines like '- <stage>: `<skill>`'
     gate was registered. A later minidump investigation found no trace of the gate in any dump, and
     upstream reports the same fault with an empty CODEX_HOME and no hooks, so the gate is not the
     known cause — see the crash investigation in docs/host-capability-matrix.md. Without the flag
-    --host codex wires the prose section only.
-  - on deepseek/dsh, the gate as a loader patch entry in the user-level $DSH_HOME/cordis.patch.yml
-    (default ~/.dsh): dsh has no per-repo plugin config, and that patch layer is applied after every
-    profile's own, so the one entry covers headless, tui and web alike.
+    --host codex writes the prose section and skips registration this invocation; an existing
+    hooks.json entry is left as-is. Skip registration with --no-enforce. Runtime hatch:
+    LOADOUT_ENFORCE=0.
+  - on deepseek/dsh, ONLY with --enforce-dsh, the gate as a loader patch entry in the
+    user-level $DSH_HOME/cordis.patch.yml (default ~/.dsh): dsh has no per-repo plugin
+    config, and that patch layer is applied after every profile's own, so the one entry
+    covers headless, tui and web alike — machine-wide. Default reapplication neither
+    removes nor rewrites an existing registration. Without the flag, --host deepseek/dsh
+    writes the prose section and skips registration this invocation. Skip registration
+    with --no-enforce. Runtime hatch: LOADOUT_ENFORCE=0. The entry pins the interpreter the
+    plugin spawns (LOADOUT_PYTHON, else python then python3), validated by running it: on
+    this host a spawn failure denies every tool call, so an interpreter that only exists is
+    not good enough, and an unusable LOADOUT_PYTHON is an error rather than a fallback.
 Re-runs replace the existing section; content before/after it is preserved. Stdlib only.
 """
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
+try:  # the stdlib TOML parser, 3.11+. The 3.9 core stays parser-free: see codex_config_problem
+    import tomllib
+except ImportError:  # pragma: no cover - depends on the running interpreter
+    tomllib = None
+
 NATIVE = {"claude-code": "CLAUDE.md", "gemini": "GEMINI.md", "qwen": "QWEN.md"}
+# Copied from scan.py (do not import the scanner: apply stays stdlib-only and path-independent).
+# Drift is pinned by tests/test_apply.py::test_host_aliases_match_the_scanner.
+HOST_ALIASES = {"claude": "claude-code", "claude_code": "claude-code", "claudecode": "claude-code",
+                "dsh": "deepseek", "deepseek-harness": "deepseek", "copilot-cli": "copilot"}
+KNOWN_HOSTS = frozenset({
+    "claude-code", "codex", "cursor", "gemini", "opencode", "crush", "qwen", "continue",
+    "copilot", "grok", "vibe", "deepseek", "hermes", "zcode",
+})
 GATE = Path(__file__).resolve().parent / "gate.py"
+GATE_CODEX = Path(__file__).resolve().parent / "gate_codex.py"
+GATE_DSH = Path(__file__).resolve().parent / "gate_dsh.py"
 DSH_PLUGIN = Path(__file__).resolve().parent / "gate_dsh.mjs"
 GATE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree|mcp__.*"
 SETTINGS_LOCAL = ".claude/settings.local.json"
 CODEX_HOOKS = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "hooks.json"
+CODEX_HOOKS_KEY = "~/.codex/hooks.json"
+# Printed only when the Codex gate actually registered. Opting in buys a known unresolved
+# limitation, and the operator should hear it at opt-in time rather than from the first denial:
+# the gate's own recovery path is the hatch. docs/host-capability-matrix.md carries the detail.
+# Not printed on the EnforcementFailed path: this invocation's registration did not complete, so
+# there is no newly trusted entry for the limitation to bite on. That is a statement about the
+# attempted write only. It is not a claim about what Codex has loaded: no removal is performed
+# here, so an existing, unchanged, already-trusted hook is left exactly as it was, and this code
+# does not observe whether the host has it loaded either way. For that case the
+# "enforcement: skipped ... existing registration preserved" line is the whole story.
+CODEX_RECOVERY_NOTE = (
+    "note: on Codex a session that has already edited cannot clear a pending stage from inside "
+    "itself — the recorded way to load a skill is a shell read and the enforced pending-stage path "
+    "admits no such read; the one Bash command it lets through first is the validated apply.py "
+    "bootstrap, which cannot load a skill. Whether this host also has a non-shell read primitive "
+    "is unknown here, and ungated tools and a prose-only project never reach that path — so "
+    "recovery is the operator hatch: LOADOUT_ENFORCE=0 (docs/host-capability-matrix.md)")
 DSH_PATCH = Path(os.environ.get("DSH_HOME") or "~/.dsh").expanduser() / "cordis.patch.yml"
 VALUE_FLAGS = {"--host", "--loadout"}  # CLI flags that consume the next token; gate.py validates against this
+BOOL_FLAGS = {"--no-enforce", "--enforce-codex", "--enforce-dsh"}  # switches; gate.py allows exactly these
+
+
+def parse_argv(argv):
+    """Validate every token before apply dispatches. Unknown/missing/repeated value-flags error."""
+    host, loadout = None, None
+    seen_value, seen_bool = set(), set()
+    positionals = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("-"):  # any dash token, so -x cannot slip through as a positional
+            if a in VALUE_FLAGS:
+                if a in seen_value:
+                    raise ValueError(f"{a} given more than once")
+                seen_value.add(a)
+                if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                    raise ValueError(f"{a} needs a value")
+                if not argv[i + 1].strip():
+                    raise ValueError(f"{a} needs a non-empty value")
+                if a == "--host":
+                    host = argv[i + 1]
+                else:
+                    loadout = argv[i + 1]
+                i += 2
+                continue
+            if a in BOOL_FLAGS:
+                seen_bool.add(a)
+                i += 1
+                continue
+            raise ValueError(f"unknown option {a}")
+        positionals.append(a)
+        i += 1
+    return {
+        "host": "unknown" if host is None else host,
+        "loadout": "LOADOUT.md" if loadout is None else loadout,
+        "enforce": "--no-enforce" not in seen_bool,
+        "enforce_codex": "--enforce-codex" in seen_bool,
+        "enforce_dsh": "--enforce-dsh" in seen_bool,
+        "args": positionals,
+    }
+
+
 SECTION_RE = re.compile(r"^## Loadout\b.*?(?=^## |\Z)", re.M | re.S)
-ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^## |\Z)", re.M | re.S)
+ACCEPTED_RE = re.compile(r"^## Accepted\b.*?(?=^#{1,6} |\Z)", re.M | re.S)
 IMPORT_RE = re.compile(r"^@AGENTS\.md\s*$", re.M)
 LINE_RE = re.compile(r"^\s*[-*]\s*([^:`]+?)\s*:\s*`?([^`\s]+)`?", re.M)
+_PLACEHOLDER = re.compile(r"^<[^>]+>$")
+
+
+class EnforcementFailed(ValueError):
+    """Requested enforcement could not register. Prose writes in `results` already happened."""
+    def __init__(self, reason, results):
+        super().__init__(reason)
+        self.reason = reason
+        self.results = results
 
 
 def gate_hooks():
@@ -232,6 +328,68 @@ def _drop_stale_gate_trust(text, hooks_path, wanted):
     return new, new != text
 
 
+def _unusable_config_parent(path):
+    """Why an absent `path` could not be created anyway, or None when it could.
+
+    A missing target is only usable if its nearest existing ancestor is a directory. Windows raises
+    FileNotFoundError for a path under a regular file exactly as it does for a genuine absence, so
+    the exception alone proves nothing -- only the ancestor's own shape does."""
+    for parent in path.parents:
+        try:
+            os.lstat(parent)  # lstat, not exists(): a dangling link is present but still unusable
+        except FileNotFoundError:
+            continue  # a genuinely absent ancestor is created along with the config
+        except OSError as e:
+            return f"its parent cannot be inspected ({parent}: {e})"
+        return None if os.path.isdir(parent) else f"its parent is not a directory ({parent})"
+    return None  # walked to the root without finding anything: nothing left to contradict absence
+
+
+def codex_config_problem(path=None):
+    """Why the existing Codex trust config cannot be safely edited, or None when it can.
+
+    trust_codex_gate edits config.toml textually, so a file Codex itself cannot parse must never be
+    appended to: the append would report trust granted while the hook stays untrusted forever, and
+    the operator would be left holding a file that is now both broken and modified. Validating an
+    existing file therefore needs a TOML parser, and the stdlib only ships one from 3.11 (tomllib).
+    None is hand-rolled and no dependency is added, so on 3.9/3.10 an existing config is rejected
+    outright rather than appended to unvalidated: prose-only use is unaffected there, and a genuinely
+    absent config is still created. Only a regular file (or a symlink resolving to one) can be
+    edited; a directory, device or dangling symlink is an existing target we cannot append to, not an
+    absence. Absence itself is not taken on trust either: the path must be one we could actually
+    create. The boundary is recorded in docs/host-capability-matrix.md."""
+    path = Path(path if path is not None else CODEX_CONFIG)
+    # lstat first, and directly: what the pathlib predicates make of a refused inspection depends
+    # on the route the interpreter takes -- 3.14.6 answers is_file/exists/is_symlink from os.path's
+    # nt._path_* accelerators, documented to answer False rather than raise for a path they cannot
+    # inspect, while 3.13.15 propagates the error out of Path.stat(). Under the False reading a
+    # denied stat and a path that can never hold a file are both indistinguishable from a genuine
+    # absence, so absence is established here instead of inferred from them
+    try:
+        os.lstat(path)  # succeeds for a dangling link too: present, and not something we can edit
+    except OSError as e:
+        problem = _unusable_config_parent(path)
+        if problem is None and isinstance(e, FileNotFoundError):
+            return None  # genuinely absent below a real directory: trust_codex_gate creates it
+        return (f"config.toml is unusable ({path}): {problem or f'it cannot be inspected ({e})'};"
+                " fix it or drop --enforce-codex")
+    if not path.is_file():  # follows symlinks, so a link resolving to a regular file stays supported
+        return f"config.toml is not a regular file ({path}); fix it or drop --enforce-codex"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"config.toml is not readable ({e}); fix it or drop --enforce-codex"
+    if tomllib is None:
+        return ("config.toml cannot be validated: this interpreter has no stdlib TOML parser"
+                " (tomllib, Python 3.11+), and an unvalidated config must not be appended to;"
+                " run apply on 3.11+ or drop --enforce-codex")
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return f"config.toml is not valid TOML ({e}); fix it or drop --enforce-codex"
+    return None
+
+
 def trust_codex_gate(hooks_path=None, config_path=None):
     """Write trusted_hash entries for our gate handlers into config.toml. Returns trusted|unchanged.
     The file is edited textually (stdlib has no TOML writer): only our own [hooks.state.'<key>']
@@ -289,17 +447,26 @@ def _dsh_append(lines, entry):
     return lines + entry + [""]
 
 
-def dsh_entry(plugin=None):
+def dsh_entry(plugin=None, python=None):
     """The loader patch entry that loads our gate. `name` must be a file:// URL: Node ESM rejects a
-    bare Windows path with ERR_UNSUPPORTED_ESM_URL_SCHEME. lstrip keeps POSIX at three slashes too."""
+    bare Windows path with ERR_UNSUPPORTED_ESM_URL_SCHEME. lstrip keeps POSIX at three slashes too.
+
+    `python`, when given, is pinned as this entry's `config.python`, which dsh hands to the plugin's
+    `apply(ctx, config)` -- the same per-entry `config` the live-proof overlay uses on its
+    `- id: settings` entry. Pinning it is what makes the interpreter apply validated and the
+    interpreter the plugin spawns the same one, instead of each side guessing from PATH. JSON is a
+    YAML 1.2 double-quoted scalar, so a path with spaces or backslashes survives the quoting."""
     url = "file:///" + str(Path(plugin or DSH_PLUGIN)).replace("\\", "/").lstrip("/")
-    return "- insert:\n    - id: loadout-gate\n      name: " + url + "\n"
+    entry = "- insert:\n    - id: loadout-gate\n      name: " + url + "\n"
+    if python:
+        entry += "      config:\n        python: " + json.dumps(str(python)) + "\n"
+    return entry
 
 
-def register_dsh_gate(path=None, plugin=None):
+def register_dsh_gate(path=None, plugin=None, python=None):
     """Upsert our entry into the user-level $DSH_HOME/cordis.patch.yml. Returns the action."""
     path = Path(path or DSH_PATCH)
-    entry = dsh_entry(plugin).rstrip("\n").split("\n")
+    entry = dsh_entry(plugin, python).rstrip("\n").split("\n")
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         write_lf(path, DSH_HEADER + "\n".join(entry) + "\n")
@@ -336,7 +503,13 @@ def parse_accepted(text):
     m = ACCEPTED_RE.search(text)
     if not m:
         return []
-    return [(stage.strip(), skill.strip()) for stage, skill in LINE_RE.findall(m.group(0))]
+    out = []
+    for stage, skill in LINE_RE.findall(m.group(0)):
+        stage, skill = stage.strip(), skill.strip()
+        if _PLACEHOLDER.match(stage) or _PLACEHOLDER.match(skill):
+            continue
+        out.append((stage, skill))
+    return out
 
 
 def block(accepted):
@@ -364,11 +537,15 @@ def upsert_native(path, blk):
     """A CLAUDE.md that imports AGENTS.md stays import-only: the section lives in AGENTS.md,
     and Claude Code would otherwise read it twice. Any duplicate left by an older apply is removed."""
     if path.name == "CLAUDE.md" and imports_agents(path):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
+        nl = "\r\n" if b"\r\n" in raw else "\n"
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         m = SECTION_RE.search(text)
         if not m:
             return "imports AGENTS.md (unchanged)"
-        write_lf(path, (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n")
+        new = (text[:m.start()] + text[m.end():]).rstrip("\n") + "\n"
+        with path.open("w", encoding="utf-8", newline="") as f:
+            f.write(new.replace("\n", nl))
         return "duplicate ## Loadout removed (imports AGENTS.md)"
     return upsert(path, blk)
 
@@ -376,7 +553,9 @@ def upsert_native(path, blk):
 def upsert(path, blk, create_with=None):
     """Replace the ## Loadout section, else append it, else create the file. Returns the action."""
     if path.is_file():
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_bytes()
+        nl = "\r\n" if b"\r\n" in raw else "\n"
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         m = SECTION_RE.search(text)
         if m:
             sep = "\n" if m.end() < len(text) else ""
@@ -385,15 +564,102 @@ def upsert(path, blk, create_with=None):
         else:
             new = text.rstrip("\n") + ("\n\n" if text.strip() else "") + blk
             action = "appended"
-    else:
-        new = blk if create_with is None else create_with
-        action = "created"
-    path.write_text(new, encoding="utf-8")
-    return action
+        with path.open("w", encoding="utf-8", newline="") as f:
+            f.write(new.replace("\n", nl))
+        return action
+    write_lf(path, blk if create_with is None else create_with)
+    return "created"
 
 
-def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False):
+def resolve_host(host):
+    """Documented aliases → table key. `unknown` and known generic hosts skip registration.
+    An explicit misspelling is an error, not a silent fallback."""
+    key = (host or "unknown").strip().lower() or "unknown"
+    key = HOST_ALIASES.get(key, key)
+    if key in KNOWN_HOSTS or key == "unknown":
+        return key
+    choices = ", ".join(sorted(KNOWN_HOSTS))
+    raise ValueError(f"unknown host {host!r}; known: {choices} (or unknown)")
+
+
+def _require_file(path, results):
+    if not path.is_file():
+        raise EnforcementFailed(f"{path.name} not found ({path})", results)
+
+
+PY_PROBE_TIMEOUT = 20  # seconds: a candidate that will not answer in bounded time is not usable
+
+
+def _usable_python(cand):
+    """`cand` resolved to an executable the dsh plugin can actually launch, or None.
+
+    A `which` hit or an existing file is not proof of usability: a Microsoft Store alias, a broken
+    install or a text file all resolve and then fail at spawn, and on this fail-closed host every
+    such failure becomes a total deny. So the candidate is run, headless and bounded, and what gets
+    pinned is the `sys.executable` it reports rather than the name it was reached by -- the plugin
+    launches it through Node's `spawnSync`, which refuses a `.cmd`/`.bat` wrapper outright (EINVAL,
+    Node 24) and will not PATHEXT-resolve one from PATH. Same interpreter, launchable form."""
+    if not cand:
+        return None
+    path = str(cand) if Path(cand).is_file() else shutil.which(str(cand))
+    if not path:
+        return None
+    try:
+        r = subprocess.run([path, "-c", "import sys; sys.stdout.write(sys.executable)"],
+                           stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                           errors="replace", timeout=PY_PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None  # not executable, not an interpreter, or it hung
+    if r.returncode != 0:
+        return None
+    reported = (r.stdout or "").strip()
+    if reported and Path(reported).is_file():
+        return reported
+    # an interpreter that reports no sys.executable (embedded, frozen) is still usable, but only if
+    # the path we would pin is one Node can spawn
+    return path if Path(path).suffix.lower() not in (".cmd", ".bat") else None
+
+
+def _dsh_python():
+    """The exact interpreter the dsh plugin will launch, resolved and proven to run.
+
+    LOADOUT_PYTHON wins and does not fall back: an explicit choice that cannot run is an error to
+    report, not a reason to launch some other interpreter under its name. Otherwise `python` then
+    `python3` -- the same candidates in the same order as the plugin's own fallback, so a
+    python3-only PATH cannot leave apply validating one interpreter while the plugin spawns
+    another."""
+    env = os.environ.get("LOADOUT_PYTHON")
+    if env:
+        return _usable_python(env)
+    for cand in ("python", "python3"):
+        found = _usable_python(cand)
+        if found:
+            return found
+    return None
+
+
+def existing_registration(project, host):
+    """On-disk gate entry for this host, if readable. Presence is not proof it is active."""
+    host = resolve_host(host)
+    try:
+        if host == "claude-code":
+            p = Path(project) / SETTINGS_LOCAL
+            if p.is_file() and "gate.py" in p.read_text(encoding="utf-8", errors="replace"):
+                return SETTINGS_LOCAL
+        elif host == "codex":
+            if CODEX_HOOKS.is_file() and "gate.py" in CODEX_HOOKS.read_text(encoding="utf-8", errors="replace"):
+                return CODEX_HOOKS_KEY
+        elif host == "deepseek":
+            if DSH_PATCH.is_file() and "gate_dsh.mjs" in DSH_PATCH.read_text(encoding="utf-8", errors="replace"):
+                return "~/.dsh/cordis.patch.yml"
+    except OSError:
+        return None
+    return None
+
+
+def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False, enforce_dsh=False):
     project = Path(project)
+    host = resolve_host(host)
     text = (project / loadout).read_text(encoding="utf-8", errors="replace")
     accepted = parse_accepted(text)
     if not accepted:
@@ -404,9 +670,15 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
     # registered, but the dumps carry no trace of the gate and upstream sees the same fault with
     # no hooks at all (docs/host-capability-matrix.md records the investigation)
     codex = enforce and enforce_codex and host == "codex"
-    dsh = enforce and host in ("deepseek", "dsh")
+    dsh = enforce and enforce_dsh and host == "deepseek"
     settings = load_settings(project / SETTINGS_LOCAL) if gate else None  # validate before touching anything
     codex_settings = load_settings(CODEX_HOOKS) if codex else None
+    if codex:
+        # before the prose writes, not after: a config we cannot parse leaves nothing to fix up,
+        # so every target file keeps its bytes
+        problem = codex_config_problem()
+        if problem:
+            raise EnforcementFailed(problem, {})
     results = {"AGENTS.md": upsert(project / "AGENTS.md", blk)}
     native = NATIVE.get(host)
     if native:
@@ -420,16 +692,43 @@ def apply(project, host, loadout="LOADOUT.md", enforce=True, enforce_codex=False
         if other != native and (project / other).is_file():
             results[other] = upsert_native(project / other, blk)
     if gate:
+        _require_file(GATE, results)
         results[SETTINGS_LOCAL] = register_gate(project, settings) + " (gate hooks take effect from the next Claude Code session)"
     if codex:
-        reg = register_codex_gate(CODEX_HOOKS, codex_settings)
-        trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
-        results["~/.codex/hooks.json"] = (reg + "; trust " + ("granted" if trust == "trusted" else "already present")
-                                          + " in config.toml (Codex loads hooks at the next session)")
+        _require_file(GATE, results)
+        _require_file(GATE_CODEX, results)
+        try:
+            reg = register_codex_gate(CODEX_HOOKS, codex_settings)
+            results[CODEX_HOOKS_KEY] = reg
+            trust = trust_codex_gate(CODEX_HOOKS, CODEX_CONFIG)
+            results[CODEX_HOOKS_KEY] = (
+                reg + "; trust " + ("granted" if trust == "trusted" else "already present")
+                + " in config.toml (Codex loads hooks at the next session)")
+        except (OSError, ValueError) as e:
+            raise EnforcementFailed(str(e), results)
     if dsh:
-        results["~/.dsh/cordis.patch.yml"] = register_dsh_gate() + (
+        _require_file(DSH_PLUGIN, results)
+        _require_file(GATE, results)
+        _require_file(GATE_DSH, results)
+        python = _dsh_python()
+        if not python:
+            chosen = os.environ.get("LOADOUT_PYTHON")
+            raise EnforcementFailed(
+                f"LOADOUT_PYTHON={chosen!r} is not a usable Python: it must resolve to an executable"
+                " that runs and reports an interpreter (an explicit choice is never replaced by"
+                " another interpreter)" if chosen else
+                "no usable Python for the dsh plugin (tried python, then python3, on PATH; set"
+                " LOADOUT_PYTHON to an interpreter that runs)", results)
+        try:
+            # registration is the last write and can still fail on its own (an unwritable or
+            # unreadable cordis.patch.yml): report it against what really landed
+            action = register_dsh_gate(python=python)
+        except (OSError, ValueError) as e:
+            raise EnforcementFailed(str(e), results)
+        results["~/.dsh/cordis.patch.yml"] = action + (
             " (dsh loads the plugin at the next session; there is no per-repo config,"
-            " so this registration covers every profile)")
+            " so this registration covers every profile)"
+            f"; plugin interpreter pinned to {python}")
     return results
 
 
@@ -438,21 +737,44 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:]
-    host = argv[argv.index("--host") + 1] if "--host" in argv else "unknown"
-    loadout = argv[argv.index("--loadout") + 1] if "--loadout" in argv else "LOADOUT.md"
-    enforce = "--no-enforce" not in argv
-    enforce_codex = "--enforce-codex" in argv
-    args = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in VALUE_FLAGS)]
+    if "--help" in argv:
+        print(__doc__)
+        return
+    try:
+        parsed = parse_argv(argv)
+    except ValueError as e:
+        print(f"apply: {e}", file=sys.stderr)
+        sys.exit(2)
+    args = parsed["args"]
     if not args:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
+    if len(args) > 1:  # gate.py already requires exactly one positional; don't silently drop the rest
+        print(f"apply: expected one project directory, got {len(args)}", file=sys.stderr)
+        sys.exit(2)
     try:
-        results = apply(args[0], host, loadout, enforce, enforce_codex)
+        results = apply(args[0], parsed["host"], parsed["loadout"],
+                        parsed["enforce"], parsed["enforce_codex"], parsed["enforce_dsh"])
+    except EnforcementFailed as e:
+        for f, action in e.results.items():
+            print(f"- {f}: {action}")
+        print(f"enforcement: skipped: {e.reason}")
+        sys.exit(2)
     except (OSError, ValueError) as e:
         print(f"apply: {e}", file=sys.stderr)
         sys.exit(2)
     for f, action in results.items():
         print(f"- {f}: {action}")
+    if CODEX_HOOKS_KEY in results:
+        print(CODEX_RECOVERY_NOTE)
+    if any(k in results for k in (SETTINGS_LOCAL, CODEX_HOOKS_KEY, "~/.dsh/cordis.patch.yml")):
+        print("enforcement: registered — takes effect next session")
+    else:
+        line = "enforcement: skipped this invocation"
+        preserved = existing_registration(args[0], parsed["host"])
+        if preserved:
+            line += f"; existing registration preserved ({preserved})"
+        print(line)
 
 
 if __name__ == "__main__":
