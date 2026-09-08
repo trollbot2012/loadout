@@ -542,8 +542,14 @@ def test_codex_host_writes_agents_md_and_user_hooks(tmp_path, codex_hooks):
     assert res["~/.codex/hooks.json"].startswith("created" + CODEX_NOTE)
     assert codex_hooks.is_file() and not (tmp_path / ".claude").exists()
     assert_codex_schema_valid(json.loads(codex_hooks.read_text(encoding="utf-8")))
-    assert apply.apply(tmp_path, "codex", enforce_codex=True)["~/.codex/hooks.json"].startswith(
-        "unchanged; trust already present")
+    if apply.tomllib is None:
+        before = codex_hooks.read_bytes()
+        with pytest.raises(apply.EnforcementFailed, match="no stdlib TOML parser"):
+            apply.apply(tmp_path, "codex", enforce_codex=True)
+        assert codex_hooks.read_bytes() == before
+    else:
+        assert apply.apply(tmp_path, "codex", enforce_codex=True)["~/.codex/hooks.json"].startswith(
+            "unchanged; trust already present")
     assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "codex", enforce=False, enforce_codex=True)
     assert "~/.codex/hooks.json" not in apply.apply(tmp_path, "claude-code", enforce_codex=True)
 

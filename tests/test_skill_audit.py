@@ -2015,6 +2015,7 @@ Timing is the whole point of putting it here: `site` imports this before the aud
 scan.py, so a read through a name the module has already bound is still wrapped. A wrapper
 installed after the import would be invisible to exactly the reads it is meant to see."""
 import builtins
+import functools
 import io
 import os
 
@@ -2051,7 +2052,9 @@ for _mod, _name, _default in ((os, "stat", None), (os, "lstat", None), (os, "sca
             _record(_target)
         return _real(*a, **k)
 
-    setattr(_mod, _name, _wrapper)
+    # Python 3.9 pathlib stores os functions on an accessor class. A partial, like
+    # the original builtin, does not bind an extra self when retrieved there.
+    setattr(_mod, _name, functools.partial(_wrapper))
 '''
 
 

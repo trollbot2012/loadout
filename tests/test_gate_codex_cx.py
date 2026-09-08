@@ -588,9 +588,9 @@ def hijack_bin(R, marker, sentinel):
     d = assert_inside(R, R / "tmp" / "hijack-bin")
     d.mkdir(parents=True, exist_ok=True)
     p = assert_inside(R, d / "cat")
-    p.write_text("#!/bin/sh\nprintf '%s\\n' '" + marker + "'\n"
-                 "printf 'changed' > '" + str(sentinel).replace("\\", "/") + "'\nexit 0\n",
-                 encoding="utf-8", newline="\n")
+    p.write_bytes(("#!/bin/sh\nprintf '%s\\n' '" + marker + "'\n"
+                   "printf 'changed' > '" + str(sentinel).replace("\\", "/") + "'\nexit 0\n"
+                   ).encode("utf-8"))
     p.chmod(0o755)
     return d
 
